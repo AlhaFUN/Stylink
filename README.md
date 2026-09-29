@@ -1,41 +1,41 @@
 # S23 Drawing Tablet
 
-Use your Galaxy S23 Ultra S Pen to draw in Windows apps. Install the Android app on the phone and run the Windows companion on your PC. The companion starts the receiver and connects USB for you; you do not need PowerShell or Python.
+Use a Galaxy S23 Ultra and its S Pen as a Windows drawing tablet. The project provides an Android app and a standalone Windows companion app.
 
-## Download the apps
+## Install the apps
 
-1. Open the repository’s [Android build workflow](https://github.com/AlhaFUN/s23-drawing-tablet/actions/workflows/android.yml). Download the **S23-Tablet-App** artifact from the latest successful run and unzip it. It contains `app-debug.apk`.
-2. Open the [Windows companion workflow](https://github.com/AlhaFUN/s23-drawing-tablet/actions/workflows/windows-companion.yml). Download the **S23-Tablet-PC** artifact from the latest successful run and unzip it. It contains `S23DrawingTabletPC.exe`.
+1. Download the latest successful [Android build](https://github.com/AlhaFUN/s23-drawing-tablet/actions/workflows/android.yml). Under **Artifacts**, download **S23-Tablet-App**, unzip it, then install `app-debug.apk` on your phone. Android may ask you to allow this APK to be installed.
+2. Download the latest successful [Windows companion build](https://github.com/AlhaFUN/s23-drawing-tablet/actions/workflows/windows-companion.yml). Under **Artifacts**, download **S23-Tablet-PC-Setup**, unzip it, then open `S23DrawingTabletPC.exe`.
 
-## First-time setup
+Windows may show a SmartScreen message because the community build is not code-signed. Download the app from this project's Actions page.
 
-1. Connect the phone to the PC with a USB data cable.
-2. Enable USB debugging on the phone: open **Settings → About phone → Software information**, tap **Build number** seven times, then open **Settings → Developer options** and turn on **USB debugging**.
-3. On the PC, get Google’s [Android SDK Platform-Tools for Windows](https://developer.android.com/tools/releases/platform-tools). Download the Windows ZIP, accept Google’s terms, and extract it. Android Studio is not needed.
-4. Run `S23DrawingTabletPC.exe`. Click **Locate adb.exe…** and select `adb.exe` inside the extracted `platform-tools` folder. The companion remembers its location.
+## Connect over USB tethering
 
-The Windows companion is open source but not code-signed, so Windows may show a SmartScreen warning. Download it from this repository’s Actions artifact.
+1. Connect the phone and PC with a USB data cable.
+2. On the phone, open **Settings → Connections → Mobile Hotspot and Tethering** and turn on **USB tethering**. This setting appears when the phone is connected to the PC.
+3. Open **S23 Drawing Tablet** on the phone.
+4. Open the Windows companion and click **Connect phone**. Wait for **Connected — ready to draw**.
 
-## Connect and draw
+The PC app finds the phone over the USB-tethered network automatically. This does not use USB debugging, ADB, a driver installer, or an inbound Windows Firewall rule. Keep both apps open while drawing.
 
-1. Unlock the phone. In the PC companion, click **Connect phone**.
-2. If the phone asks whether to allow USB debugging, tap **Allow**. The companion starts the Windows receiver, creates the USB connection, and opens the phone app.
-3. If the phone app is not installed yet, click **Install phone APK…** in the PC companion and choose `app-debug.apk` from the Android artifact ZIP.
-4. Wait for **Connected — ready to draw** on the phone. Draw with the S Pen in the phone’s drawing area; then draw in Paint or another Windows app.
+## Draw
 
-Leave the PC companion open while drawing. Use **Disconnect** when finished. The companion restores the USB connection if the cable is briefly unplugged.
+- Draw in the phone app's **Drawing pad** with the S Pen. Finger touches are ignored. Tap **Full screen** for a larger pad; press Android Back to leave it.
+- To show only part of the PC screen on the phone, disconnect, click **Select screen area…** in the PC app, and drag a rectangle. Reconnect to see that area on the phone and map the S Pen to it.
+- Click **Show full screen** in the PC app to map the S Pen across the whole Windows desktop and turn off the phone preview.
 
 ## If it does not connect
 
-- On the phone, **Not connected** means the PC receiver or USB connection is not ready yet.
-- Keep the phone unlocked and approve the USB debugging prompt.
-- Check that the PC companion says the phone is connected and leave it running.
-- If Windows does not detect the phone, try another USB data cable or USB port.
+- Make sure USB tethering is on while the phone is plugged into the PC. The phone app should say that USB tethering is on; the PC app will keep looking for it.
+- Keep the phone app open and click **Connect phone** in the PC app.
+- Try another USB data cable or USB port if Windows does not show a USB network connection.
+- Disconnect and reconnect after changing the screen selection.
 
-The Android drawing area previews S Pen strokes locally. Strokes reach Windows only after the phone says **Connected — ready to draw**. Finger touches are ignored.
+## Project files
 
-## Notes
+- Android app: [`android/`](android/)
+- Windows app and setup guide: [`pc/`](pc/) and [`host/`](host/)
+- Android APK workflow: [`.github/workflows/android.yml`](.github/workflows/android.yml)
+- Windows app workflow: [`.github/workflows/windows-companion.yml`](.github/workflows/windows-companion.yml)
 
-- The companion’s first setup needs an internet connection only to download Android Platform-Tools from Google. It does not install Android Studio or Python.
-- Wi-Fi is an advanced, manual option; USB is the supported one-click setup.
-- The Windows host uses the Windows pointer API. Some drawing apps may not accept synthetic pen input.
+The Windows host injects synthetic pen input through the Windows pointer API. Some drawing programs may ignore synthetic pen input or handle pressure differently.

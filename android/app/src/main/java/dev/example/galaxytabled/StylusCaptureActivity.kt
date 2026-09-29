@@ -1,128 +1,273 @@
 package dev.example.galaxytabled
 
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.os.Bundle
+import android.util.Base64
 import android.view.MotionEvent
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicText
+import androidx.compose.ui.Alignment
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.setValue
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
 import org.json.JSONObject
-import java.io.BufferedReader
 import java.io.BufferedWriter
-import java.io.EOFException
-import java.io.InputStreamReader
 import java.io.OutputStreamWriter
+import java.io.BufferedReader
+import java.io.InputStreamReader
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.net.Socket
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import kotlin.concurrent.thread
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-/** Replace these values with app settings before shipping. Use 127.0.0.1 for adb reverse. */
-private const val HOST = "127.0.0.1"
-private const val PORT = 8765
+/** Must match the Windows receiver's first-session authentication token. */
 private const val SESSION_TOKEN = "MySecretToken123"
+private const val TETHER_PORT = 8765
+private const val MAX_PROTOCOL_LINE = 4 * 1024 * 1024
 
 class StylusCaptureActivity : ComponentActivity() {
     private var captureView: StylusCaptureView? = null
+    private var tetherLink: TetherTcpLink? = null
+    private var latestDesktopFrame: Bitmap? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            var connectionMessage by remember { mutableStateOf("Looking for the Windows receiver…") }
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(Color(0xFFF4F6FA))
-                    .statusBarsPadding()
-                    .navigationBarsPadding()
-                    .padding(horizontal = 20.dp, vertical = 12.dp)
-            ) {
-                BasicText(
-                    "S23 Drawing Tablet",
-                    style = TextStyle(fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A))
-                )
-                BasicText(
-                    "Use your S Pen to draw on your Windows PC.",
-                    style = TextStyle(fontSize = 14.sp, color = Color(0xFF536176))
-                )
-                Spacer(Modifier.height(14.dp))
-                BasicText(
-                    connectionMessage,
-                    style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF174A83))
-                )
-                Spacer(Modifier.height(12.dp))
-                BasicText(
-                    "Connect by USB:\n1. Open S23 Drawing Tablet on the PC.\n2. Connect the phone and approve USB debugging.\n3. Click Connect phone in the PC app.",
-                    style = TextStyle(fontSize = 13.sp, lineHeight = 19.sp, color = Color(0xFF344256))
-                )
-                Spacer(Modifier.height(14.dp))
-                BasicText(
-                    "S Pen drawing area",
-                    style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF536176))
-                )
-                Spacer(Modifier.height(8.dp))
-                AndroidView(
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(18.dp))
-                        .background(Color.White),
-                    factory = { context ->
-                        StylusCaptureView(context, HOST, PORT, SESSION_TOKEN) { connected, message ->
-                            runOnUiThread {
-                                connectionMessage = if (connected) "Connected — ready to draw" else message
-                            }
-                        }.also { captureView = it }
+            var connectionMessage by remember { mutableStateOf("Turn on USB tethering, then open the PC app and tap Connect phone.") }
+            var fullScreen by remember { mutableStateOf(false) }
+            val link = remember {
+                TetherTcpLink(
+                    token = SESSION_TOKEN,
+                    onConnectionState = { connected, message ->
+                        runOnUiThread {
+                            connectionMessage = if (connected) "Connected — ready to draw" else message
+                        }
+                    },
+                    onScreenFrame = { bitmap ->
+                        runOnUiThread {
+                            latestDesktopFrame = bitmap
+                            captureView?.setDesktopFrame(bitmap)
+                        }
                     }
-                )
-                Spacer(Modifier.height(8.dp))
-                BasicText(
-                    "Draw with the S Pen in the area above. Touches from your finger are ignored.",
-                    style = TextStyle(fontSize = 12.sp, color = Color(0xFF68758A))
-                )
+                ).also { tetherLink = it }
+            }
+            LaunchedEffect(fullScreen) { setImmersiveMode(fullScreen) }
+            BackHandler(enabled = fullScreen) { fullScreen = false }
+            DisposableEffect(link) {
+                link.start()
+                onDispose { link.close() }
+            }
+            if (fullScreen) {
+                Box(Modifier.fillMaxSize().background(Color.Black)) {
+                    AndroidView(
+                        modifier = Modifier.fillMaxSize(),
+                        factory = { context ->
+                            StylusCaptureView(context, link::send).also {
+                                captureView = it
+                                it.setDesktopFrame(latestDesktopFrame)
+                            }
+                        }
+                    )
+                    BasicText(
+                        "Exit full screen",
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(18.dp)
+                            .background(Color(0x99000000), RoundedCornerShape(8.dp))
+                            .clickable { fullScreen = false }
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        style = TextStyle(color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color(0xFFF2F5FA))
+                        .statusBarsPadding()
+                        .navigationBarsPadding()
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(15.dp))
+                                .background(Color(0xFF1D5FBF)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            BasicText("S", style = TextStyle(fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color.White))
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            BasicText("S23 Drawing Tablet", style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A)))
+                            BasicText("Your S Pen, on your Windows PC", style = TextStyle(fontSize = 13.sp, color = Color(0xFF64748B)))
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(20.dp))
+                            .background(Color.White)
+                            .border(1.dp, Color(0xFFE5EAF1), RoundedCornerShape(20.dp))
+                            .padding(15.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(9.dp).clip(CircleShape)
+                                    .background(if (connectionMessage.startsWith("Connected")) Color(0xFF2CA66F) else Color(0xFFE1A438))
+                            )
+                            Spacer(Modifier.width(9.dp))
+                            BasicText(
+                                if (connectionMessage.startsWith("Connected")) "Connected" else "USB tether connection",
+                                style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF203149))
+                            )
+                        }
+                        BasicText(
+                            connectionMessage,
+                            modifier = Modifier.padding(top = 7.dp),
+                            style = TextStyle(fontSize = 13.sp, lineHeight = 18.sp, color = Color(0xFF5D6B7E))
+                        )
+                        BasicText(
+                            "Open USB tethering settings  ›",
+                            modifier = Modifier
+                                .padding(top = 12.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Color(0xFF1D5FBF))
+                                .clickable { openTetherSettings() }
+                                .padding(horizontal = 14.dp, vertical = 10.dp),
+                            style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White)
+                        )
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color(0xFFE8EFF9))
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        BasicText("Quick setup", style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF25436B)))
+                        BasicText("1  Plug the phone into the PC with a USB data cable.", style = TextStyle(fontSize = 12.sp, color = Color(0xFF42556E)))
+                        BasicText("2  Turn on USB tethering in Android Settings.", style = TextStyle(fontSize = 12.sp, color = Color(0xFF42556E)))
+                        BasicText("3  Open the PC app and choose Connect phone.", style = TextStyle(fontSize = 12.sp, color = Color(0xFF42556E)))
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            BasicText("Drawing pad", style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF25354B)))
+                            BasicText("S Pen only · PC screen preview appears here", style = TextStyle(fontSize = 11.sp, color = Color(0xFF758196)))
+                        }
+                        BasicText(
+                            "FULL SCREEN",
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(Color(0xFFDCE8F8))
+                                .clickable { fullScreen = true }
+                                .padding(horizontal = 12.dp, vertical = 9.dp),
+                            style = TextStyle(fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1D5FBF))
+                        )
+                    }
+
+                    AndroidView(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(20.dp))
+                            .border(1.dp, Color(0xFFE4E9F0), RoundedCornerShape(20.dp))
+                            .background(Color.White),
+                        factory = { context ->
+                            StylusCaptureView(context, link::send).also {
+                                captureView = it
+                                it.setDesktopFrame(latestDesktopFrame)
+                            }
+                        }
+                    )
+                    BasicText("Finger touches are ignored. Hold the S Pen near the pad to move the cursor.", style = TextStyle(fontSize = 11.sp, color = Color(0xFF758196), textAlign = TextAlign.Center))
+                }
             }
         }
+    }
+
+    private fun openTetherSettings() {
+        try {
+            startActivity(Intent("android.settings.TETHER_SETTINGS"))
+        } catch (_: Exception) {
+            try {
+                startActivity(Intent(Settings.ACTION_WIRELESS_SETTINGS))
+            } catch (_: Exception) {
+                startActivity(Intent(Settings.ACTION_SETTINGS))
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun setImmersiveMode(enabled: Boolean) {
+        window.decorView.systemUiVisibility = if (enabled) {
+            (View.SYSTEM_UI_FLAG_FULLSCREEN or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY or View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+        } else 0
     }
 
     override fun onDestroy() {
         captureView?.close()
         captureView = null
+        tetherLink?.close()
+        tetherLink = null
         super.onDestroy()
     }
 }
@@ -130,13 +275,10 @@ class StylusCaptureActivity : ComponentActivity() {
 /** A full-screen View is used so the app receives platform MotionEvents and batched history. */
 private class StylusCaptureView(
     context: Context,
-    host: String,
-    port: Int,
-    token: String,
-    onConnectionState: (Boolean, String) -> Unit
+    private val sendPacket: (JSONObject) -> Unit
 ) : View(context) {
-    private val sender = TcpPenSender(host, port, token, onConnectionState)
     private val sequence = AtomicLong(0)
+    private var desktopFrame: Bitmap? = null
     private var inContact = false
     private val localStroke = Path()
     private var hasLocalStroke = false
@@ -162,10 +304,18 @@ private class StylusCaptureView(
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        if (!hasLocalStroke) {
+        val frame = desktopFrame
+        if (frame != null) {
+            canvas.drawBitmap(frame, null, android.graphics.Rect(0, 0, width, height), null)
+        } else if (!hasLocalStroke) {
             canvas.drawText("Move the S Pen here to begin", width / 2f, height / 2f, hintPaint)
         }
         canvas.drawPath(localStroke, strokePaint)
+    }
+
+    fun setDesktopFrame(bitmap: Bitmap?) {
+        desktopFrame = bitmap
+        invalidate()
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -198,7 +348,8 @@ private class StylusCaptureView(
                 }
             }
             MotionEvent.ACTION_CANCEL -> {
-                if (inContact) emitCurrent(event, 0, "cancel")
+                val stylusIndex = (0 until event.pointerCount).firstOrNull { isStylus(event, it) }
+                if (inContact && stylusIndex != null) emitCurrent(event, stylusIndex, "cancel")
                 inContact = false
                 return true
             }
@@ -226,12 +377,11 @@ private class StylusCaptureView(
         return super.onGenericMotionEvent(event)
     }
 
-    private fun isStylus(event: MotionEvent, index: Int): Boolean =
-        index in 0 until event.pointerCount &&
-            event.getToolType(index) in setOf(
-                MotionEvent.TOOL_TYPE_STYLUS,
-                MotionEvent.TOOL_TYPE_ERASER
-            )
+    private fun isStylus(event: MotionEvent, index: Int): Boolean {
+        if (index !in 0 until event.pointerCount) return false
+        val tool = event.getToolType(index)
+        return tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER
+    }
 
     private fun emitWithHistory(event: MotionEvent, pointer: Int, phase: String) {
         for (historyIndex in 0 until event.historySize) {
@@ -301,7 +451,7 @@ private class StylusCaptureView(
             pressure.coerceIn(0f, 1f)
         }
 
-        sender.send(
+        sendPacket(
             JSONObject()
                 .put("type", "pen")
                 .put("v", 1)
@@ -318,95 +468,188 @@ private class StylusCaptureView(
         )
     }
 
-    fun close() = sender.close()
+    fun close() = Unit
 }
 
-/** Single ordered TCP writer. A bounded production queue should preserve DOWN/UP while shedding MOVE. */
-private class TcpPenSender(
-    private val host: String,
-    private val port: Int,
+/** Hosts the pen service only on Android's USB-tether network interface. */
+private class TetherTcpLink(
     private val token: String,
-    private val onConnectionState: (Boolean, String) -> Unit
+    private val onConnectionState: (Boolean, String) -> Unit,
+    private val onScreenFrame: (Bitmap?) -> Unit
 ) {
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val outgoing = Channel<String>(capacity = 512)
+    private val outgoing = LinkedBlockingQueue<String>(512)
+    @Volatile private var closed = false
+    @Volatile private var serverSocket: ServerSocket? = null
     @Volatile private var activeSocket: Socket? = null
-    @Volatile private var ready = false
+    @Volatile private var writerThread: Thread? = null
+    @Volatile private var workerThread: Thread? = null
+    @Volatile private var connected = false
+    @Volatile private var lastStatus = ""
 
-    init {
-        scope.launch {
-            var backoffMs = 250L
-            while (isActive) {
-                var socket: Socket? = null
-                try {
-                    onConnectionState(false, "Connecting to $host:$port…")
-                    socket = Socket().apply {
-                        tcpNoDelay = true
-                        connect(InetSocketAddress(host, port), 3000)
-                    }
-                    activeSocket = socket
-                    val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
-                    val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
-                    writer.write(JSONObject().put("type", "hello").put("v", 1).put("token", token).toString())
-                    writer.newLine()
-                    writer.flush()
-                    val response = reader.readLine() ?: throw EOFException("Host closed before ready")
-                    if (JSONObject(response).optString("type") != "ready") {
-                        throw IllegalStateException("Host rejected the session")
-                    }
-                    // Discard any stale samples from a prior session before accepting new events.
-                    while (outgoing.tryReceive().isSuccess) { }
-                    ready = true
-                    onConnectionState(true, "Connected — ready to draw")
-                    backoffMs = 250L
+    fun start() {
+        if (closed || workerThread?.isAlive == true) return
+        workerThread = thread(name = "UsbTetherPenServer", isDaemon = true) { serve() }
+    }
 
-                    kotlinx.coroutines.coroutineScope {
-                        launch {
-                            while (isActive) {
-                                val line = reader.readLine() ?: throw EOFException("Host disconnected")
-                            }
-                        }
-                        launch {
-                            for (line in outgoing) {
-                                writer.write(line)
-                                writer.newLine()
-                                writer.flush()
-                            }
-                        }
-                    }
-                } catch (error: Exception) {
-                    val message = if (error is IllegalStateException) {
-                        "Receiver rejected the connection. Check that the PC and phone use the same app version."
-                    } else {
-                        "Not connected. Open S23 Drawing Tablet on the PC and click Connect phone."
-                    }
-                    onConnectionState(false, message)
-                    // Reconnect below. The host releases an active pointer when this socket closes.
-                } finally {
-                    ready = false
-                    try { socket?.close() } catch (_: Exception) { }
-                    activeSocket = null
-                }
-                delay(backoffMs)
-                backoffMs = (backoffMs * 2).coerceAtMost(5000L)
+    private fun serve() {
+        while (!closed) {
+            val address = findUsbTetherAddress()
+            if (address == null) {
+                publish(false, "Turn on USB tethering in Settings → Connections → Mobile Hotspot and Tethering.")
+                pause(900)
+                continue
             }
+
+            var listener: ServerSocket? = null
+            try {
+                listener = ServerSocket()
+                listener.reuseAddress = true
+                listener.bind(InetSocketAddress(address, TETHER_PORT), 2)
+                listener.soTimeout = 800
+                serverSocket = listener
+                publish(false, "USB tethering is on. Open the PC app and tap Connect phone.")
+                while (!closed && !listener.isClosed) {
+                    try {
+                        val socket = listener.accept()
+                        socket.tcpNoDelay = true
+                        socket.keepAlive = true
+                        activeSocket = socket
+                        runSession(socket)
+                    } catch (_: SocketTimeoutException) {
+                        // Periodically re-check the tether interface and app lifecycle.
+                    }
+                }
+            } catch (error: Exception) {
+                if (!closed) {
+                    publish(false, "USB tether link changed. Waiting for it to reconnect…")
+                }
+            } finally {
+                if (serverSocket === listener) serverSocket = null
+                try { listener?.close() } catch (_: Exception) { }
+            }
+            pause(700)
+        }
+    }
+
+    private fun runSession(socket: Socket) {
+        try {
+            val input = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8), 8192)
+            val output = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), 8192)
+            writeLine(output, JSONObject().put("type", "service").put("name", "s23-drawing-tablet").put("v", 1).toString())
+
+            val hello = readLimitedLine(input) ?: throw IllegalStateException("PC closed the connection.")
+            val request = JSONObject(hello)
+            val supplied = request.optString("token", "")
+            if (request.optString("type") != "hello" || request.optInt("v") != 1 || supplied != token) {
+                writeLine(output, JSONObject().put("type", "error").put("message", "unauthorized").toString())
+                throw IllegalStateException("PC app rejected. Install the matching app releases.")
+            }
+
+            outgoing.clear()
+            writeLine(output, JSONObject().put("type", "ready").put("v", 1).toString())
+            connected = true
+            publish(true, "Connected — ready to draw")
+            writerThread = thread(name = "UsbTetherPenWriter", isDaemon = true) {
+                try {
+                    while (!closed && !socket.isClosed && !Thread.currentThread().isInterrupted) {
+                        val message = outgoing.poll(250, TimeUnit.MILLISECONDS) ?: continue
+                        writeLine(output, message)
+                    }
+                } catch (_: Exception) {
+                    try { socket.close() } catch (_: Exception) { }
+                }
+            }
+
+            while (!closed && !socket.isClosed) {
+                val line = readLimitedLine(input) ?: break
+                val packet = JSONObject(line)
+                if (packet.optString("type") == "screen") {
+                    val encoded = packet.optString("jpeg", "")
+                    if (encoded.isNotEmpty()) {
+                        val bytes = Base64.decode(encoded, Base64.DEFAULT)
+                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                        if (bitmap != null) onScreenFrame(bitmap)
+                    }
+                }
+            }
+            if (!closed) publish(false, "PC disconnected. The phone is ready to reconnect.")
+        } catch (error: Exception) {
+            if (!closed && connected) {
+                publish(false, "Connection ended. Check the cable and USB tethering, then reconnect.")
+            }
+        } finally {
+            connected = false
+            outgoing.clear()
+            writerThread?.interrupt()
+            writerThread = null
+            if (activeSocket === socket) activeSocket = null
+            try { socket.close() } catch (_: Exception) { }
+            onScreenFrame(null)
         }
     }
 
     fun send(message: JSONObject) {
-        if (!ready) return
-        if (outgoing.trySend(message.toString()).isFailure) {
-            // A congested queue must not lose a pen-up and leave a stroke held on Windows.
-            // Closing the connection makes the host synthesize a cancel, then the sender reconnects.
-            ready = false
+        if (closed || !connected) return
+        if (!outgoing.offer(message.toString())) {
+            // End this session rather than leave Windows holding a pen-down state.
             try { activeSocket?.close() } catch (_: Exception) { }
         }
     }
 
+    private fun findUsbTetherAddress(): InetAddress? {
+        return try {
+            val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
+            while (interfaces.hasMoreElements()) {
+                val network = interfaces.nextElement()
+                val name = network.name.lowercase()
+                if (!name.contains("rndis") && !name.contains("usb")) continue
+                if (!network.isUp) continue
+                val addresses = network.inetAddresses
+                while (addresses.hasMoreElements()) {
+                    val address = addresses.nextElement()
+                    if (address is Inet4Address && !address.isLoopbackAddress) return address
+                }
+            }
+            null
+        } catch (_: SocketException) {
+            null
+        }
+    }
+
+    private fun readLimitedLine(reader: BufferedReader): String? {
+        val line = StringBuilder()
+        while (true) {
+            val next = reader.read()
+            if (next == -1) return if (line.isEmpty()) null else line.toString()
+            if (next == '\n'.code) return line.toString().removeSuffix("\r")
+            if (line.length >= MAX_PROTOCOL_LINE) throw IllegalArgumentException("Protocol message is too large.")
+            line.append(next.toChar())
+        }
+    }
+
+    private fun writeLine(writer: BufferedWriter, message: String) {
+        writer.write(message)
+        writer.newLine()
+        writer.flush()
+    }
+
+    private fun publish(isConnected: Boolean, message: String) {
+        if (lastStatus == message && connected == isConnected) return
+        lastStatus = message
+        onConnectionState(isConnected, message)
+    }
+
+    private fun pause(milliseconds: Long) {
+        try { Thread.sleep(milliseconds) } catch (_: InterruptedException) { }
+    }
+
     fun close() {
-        ready = false
+        if (closed) return
+        closed = true
+        try { serverSocket?.close() } catch (_: Exception) { }
         try { activeSocket?.close() } catch (_: Exception) { }
-        outgoing.close()
-        scope.cancel()
+        writerThread?.interrupt()
+        workerThread?.interrupt()
+        onScreenFrame(null)
     }
 }

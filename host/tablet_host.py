@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Receive JSON Lines from the Android app and inject Windows synthetic pen input."""
+"""Connect to the Android USB-tether service and inject Windows synthetic pen input."""
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
 import ctypes
-import hmac
 import json
 import math
 import sys
@@ -14,8 +14,9 @@ from dataclasses import dataclass
 from typing import Any
 
 PORT = 8765
-MAX_LINE = 4096
+MAX_LINE = 2 * 1024 * 1024
 AUTH_TOKEN = "MySecretToken123"
+SERVICE_GREETING = {"type": "service", "name": "s23-drawing-tablet", "v": 1}
 
 if sys.platform != "win32":
     raise SystemExit("This host injector requires Windows 10 1809+ (desktop).")
@@ -278,105 +279,124 @@ def get_screen_rect(args: argparse.Namespace) -> ScreenRect:
     return rect
 
 
-async def run_server(
+async def connect_to_phone(
     args: argparse.Namespace,
+    phone_ip: str,
     *,
-    stop_event: asyncio.Event | None = None,
-    on_listening: Any | None = None,
+    stop_event: Any | None = None,
     on_client_state: Any | None = None,
+    timeout: float = 1.0,
 ) -> None:
-    injector = PenInjector(get_screen_rect(args))
-    active_client = asyncio.Lock()
-    client_tasks: set[asyncio.Task[Any]] = set()
+    """Connect outward to the phone's USB-tethered TCP service.
 
-    async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        peer = writer.get_extra_info("peername")
-        authenticated = False
-        if active_client.locked():
-            writer.close()
-            await writer.wait_closed()
-            return
-        async with active_client:
-            task = asyncio.current_task()
-            if task is not None:
-                client_tasks.add(task)
+    The phone sends a harmless service greeting first. Credentials are sent
+    only after that greeting matches, so checking gateway addresses cannot
+    disclose the session token to unrelated network devices.
+    """
+    reader, writer = await asyncio.wait_for(
+        asyncio.open_connection(phone_ip, PORT, limit=MAX_LINE), timeout=timeout
+    )
+    injector: PenInjector | None = None
+    authenticated = False
+    preview_task: asyncio.Task[Any] | None = None
+    capture_rect = None
+    if all(getattr(args, key, None) is not None for key in ("left", "top", "width", "height")):
+        from pc.screen_capture import CaptureRect
+
+        capture_rect = CaptureRect(args.left, args.top, args.width, args.height)
+
+    async def send_screen_preview(writer: asyncio.StreamWriter) -> None:
+        from pc.screen_capture import jpeg_preview
+
+        while True:
             try:
-                raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
-                if not raw or len(raw) > MAX_LINE:
-                    raise ValueError("missing or oversized hello")
-                hello = json.loads(raw)
-                supplied = hello.get("token", "") if isinstance(hello, dict) else ""
-                if not isinstance(hello, dict) or hello.get("type") != "hello" or hello.get("v") != 1 or not isinstance(supplied, str) or not hmac.compare_digest(supplied, AUTH_TOKEN):
-                    writer.write(b'{"type":"error","message":"unauthorized"}\n')
-                    await writer.drain()
-                    return
-                writer.write(b'{"type":"ready","v":1}\n')
+                image, width, height = await asyncio.to_thread(jpeg_preview, capture_rect)
+                message = {
+                    "type": "screen",
+                    "jpeg": base64.b64encode(image).decode("ascii"),
+                    "width": width,
+                    "height": height,
+                }
+                writer.write((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
                 await writer.drain()
-                authenticated = True
-                if on_client_state is not None:
-                    on_client_state(True, str(peer))
-                print(f"Connected: {peer}")
-
-                while True:
-                    raw = await reader.readline()
-                    if not raw:
-                        break
-                    if len(raw) > MAX_LINE:
-                        raise ValueError("oversized packet")
-                    packet = json.loads(raw)
-                    if not isinstance(packet, dict) or packet.get("type") != "pen" or packet.get("v") != 1:
-                        raise ValueError("unsupported packet")
-                    try:
-                        injector.inject(packet)
-                    except (ValueError, OSError) as exc:
-                        print(f"Dropped invalid/injection-failed packet from {peer}: {exc}")
-            except (asyncio.TimeoutError, asyncio.LimitOverrunError, json.JSONDecodeError, ValueError) as exc:
-                print(f"Connection ended ({peer}): {exc}")
+                await asyncio.sleep(0.2)
+            except asyncio.CancelledError:
+                raise
             except (ConnectionError, BrokenPipeError):
-                pass
-            finally:
-                if authenticated and on_client_state is not None:
-                    on_client_state(False, str(peer))
-                injector.release_after_disconnect()
-                writer.close()
-                try:
-                    await writer.wait_closed()
-                except ConnectionError:
-                    pass
-                print(f"Disconnected: {peer}")
-                if task is not None:
-                    client_tasks.discard(task)
+                return
+            except Exception as exc:
+                print(f"Screen preview paused: {exc}")
+                await asyncio.sleep(1.0)
 
-    server: asyncio.AbstractServer | None = None
+    peer = writer.get_extra_info("peername")
     try:
-        server = await asyncio.start_server(handle_client, args.host, args.port, limit=MAX_LINE)
-        locations = ", ".join(str(sock.getsockname()) for sock in (server.sockets or []))
-        print(f"Listening on {locations}; virtual screen={injector.rect}; one authenticated client at a time.")
-        if on_listening is not None:
-            on_listening(locations)
-        if stop_event is None:
-            async with server:
-                await server.serve_forever()
-        else:
-            await stop_event.wait()
+        raw = await asyncio.wait_for(reader.readline(), timeout=2.0)
+        if not raw or len(raw) > MAX_LINE:
+            raise ValueError("phone did not send a service greeting")
+        greeting = json.loads(raw)
+        if greeting != SERVICE_GREETING:
+            raise ValueError("network device did not identify as the S23 Drawing Tablet app")
+
+        # Identify the phone before creating the pointer or sending credentials.
+        injector = PenInjector(get_screen_rect(args))
+        hello = {"type": "hello", "v": 1, "token": AUTH_TOKEN}
+        writer.write((json.dumps(hello, separators=(",", ":")) + "\n").encode("utf-8"))
+        await writer.drain()
+        raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
+        if not raw or len(raw) > MAX_LINE:
+            raise ValueError("phone did not confirm the session")
+        response = json.loads(raw)
+        if not isinstance(response, dict) or response.get("type") != "ready" or response.get("v") != 1:
+            raise ValueError("phone rejected the session; update both apps from the same release")
+
+        authenticated = True
+        if on_client_state is not None:
+            on_client_state(True, str(peer))
+        print(f"Connected to phone: {peer}; virtual screen={injector.rect}")
+        if capture_rect is not None:
+            preview_task = asyncio.create_task(send_screen_preview(writer))
+
+        while stop_event is None or not stop_event.is_set():
+            try:
+                raw = await asyncio.wait_for(reader.readline(), timeout=0.25)
+            except asyncio.TimeoutError:
+                continue
+            if not raw:
+                break
+            if len(raw) > MAX_LINE:
+                raise ValueError("oversized pen packet")
+            packet = json.loads(raw)
+            if not isinstance(packet, dict) or packet.get("type") != "pen" or packet.get("v") != 1:
+                raise ValueError("unsupported packet")
+            try:
+                injector.inject(packet)
+            except (ValueError, OSError) as exc:
+                print(f"Dropped invalid/injection-failed packet from {peer}: {exc}")
+    except (asyncio.TimeoutError, asyncio.LimitOverrunError, json.JSONDecodeError, ValueError) as exc:
+        print(f"Connection ended ({peer}): {exc}")
+        raise
+    except (ConnectionError, BrokenPipeError):
+        pass
     finally:
-        if server is not None:
-            server.close()
-        active_tasks = [task for task in client_tasks if not task.done()]
-        for task in active_tasks:
-            task.cancel()
-        if active_tasks:
-            await asyncio.gather(*active_tasks, return_exceptions=True)
-        if server is not None:
-            await server.wait_closed()
-        injector.release_after_disconnect()
-        injector.close()
+        if preview_task is not None:
+            preview_task.cancel()
+            await asyncio.gather(preview_task, return_exceptions=True)
+        if authenticated and on_client_state is not None:
+            on_client_state(False, str(peer))
+        if injector is not None:
+            injector.release_after_disconnect()
+            injector.close()
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except ConnectionError:
+            pass
+        print(f"Disconnected from phone: {peer}")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--host", default="127.0.0.1", help="Use 0.0.0.0 for Wi-Fi; loopback is the safe default.")
-    parser.add_argument("--port", type=int, default=PORT)
+    parser.add_argument("--phone-ip", required=True, help="USB-tether gateway address reported by Windows.")
     parser.add_argument("--left", type=int)
     parser.add_argument("--top", type=int)
     parser.add_argument("--width", type=int)
@@ -386,6 +406,7 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     try:
-        asyncio.run(run_server(parse_args()))
+        parsed = parse_args()
+        asyncio.run(connect_to_phone(parsed, parsed.phone_ip))
     except KeyboardInterrupt:
         pass
