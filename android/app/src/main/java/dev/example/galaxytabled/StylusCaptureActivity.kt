@@ -88,7 +88,7 @@ class StylusCaptureActivity : ComponentActivity() {
                 )
                 Spacer(Modifier.height(12.dp))
                 BasicText(
-                    "Connect by USB:\n1. Start the Windows receiver:  py .\\host\\tablet_host.py\n2. Connect the phone by USB and approve USB debugging.\n3. On the PC run:  adb reverse tcp:8765 tcp:8765",
+                    "Connect by USB:\n1. Open S23 Drawing Tablet on the PC.\n2. Connect the phone and approve USB debugging.\n3. Click Connect phone in the PC app.",
                     style = TextStyle(fontSize = 13.sp, lineHeight = 19.sp, color = Color(0xFF344256))
                 )
                 Spacer(Modifier.height(14.dp))
@@ -378,7 +378,7 @@ private class TcpPenSender(
                     val message = if (error is IllegalStateException) {
                         "Receiver rejected the connection. Check that the PC and phone use the same app version."
                     } else {
-                        "Not connected. Start the Windows receiver, then run adb reverse tcp:8765 tcp:8765 on the PC."
+                        "Not connected. Open S23 Drawing Tablet on the PC and click Connect phone."
                     }
                     onConnectionState(false, message)
                     // Reconnect below. The host releases an active pointer when this socket closes.

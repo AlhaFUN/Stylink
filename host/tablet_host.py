@@ -278,17 +278,28 @@ def get_screen_rect(args: argparse.Namespace) -> ScreenRect:
     return rect
 
 
-async def run_server(args: argparse.Namespace) -> None:
+async def run_server(
+    args: argparse.Namespace,
+    *,
+    stop_event: asyncio.Event | None = None,
+    on_listening: Any | None = None,
+    on_client_state: Any | None = None,
+) -> None:
     injector = PenInjector(get_screen_rect(args))
     active_client = asyncio.Lock()
+    client_tasks: set[asyncio.Task[Any]] = set()
 
     async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         peer = writer.get_extra_info("peername")
+        authenticated = False
         if active_client.locked():
             writer.close()
             await writer.wait_closed()
             return
         async with active_client:
+            task = asyncio.current_task()
+            if task is not None:
+                client_tasks.add(task)
             try:
                 raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
                 if not raw or len(raw) > MAX_LINE:
@@ -301,6 +312,9 @@ async def run_server(args: argparse.Namespace) -> None:
                     return
                 writer.write(b'{"type":"ready","v":1}\n')
                 await writer.drain()
+                authenticated = True
+                if on_client_state is not None:
+                    on_client_state(True, str(peer))
                 print(f"Connected: {peer}")
 
                 while True:
@@ -321,6 +335,8 @@ async def run_server(args: argparse.Namespace) -> None:
             except (ConnectionError, BrokenPipeError):
                 pass
             finally:
+                if authenticated and on_client_state is not None:
+                    on_client_state(False, str(peer))
                 injector.release_after_disconnect()
                 writer.close()
                 try:
@@ -328,14 +344,31 @@ async def run_server(args: argparse.Namespace) -> None:
                 except ConnectionError:
                     pass
                 print(f"Disconnected: {peer}")
+                if task is not None:
+                    client_tasks.discard(task)
 
+    server: asyncio.AbstractServer | None = None
     try:
         server = await asyncio.start_server(handle_client, args.host, args.port, limit=MAX_LINE)
         locations = ", ".join(str(sock.getsockname()) for sock in (server.sockets or []))
         print(f"Listening on {locations}; virtual screen={injector.rect}; one authenticated client at a time.")
-        async with server:
-            await server.serve_forever()
+        if on_listening is not None:
+            on_listening(locations)
+        if stop_event is None:
+            async with server:
+                await server.serve_forever()
+        else:
+            await stop_event.wait()
     finally:
+        if server is not None:
+            server.close()
+        active_tasks = [task for task in client_tasks if not task.done()]
+        for task in active_tasks:
+            task.cancel()
+        if active_tasks:
+            await asyncio.gather(*active_tasks, return_exceptions=True)
+        if server is not None:
+            await server.wait_closed()
         injector.release_after_disconnect()
         injector.close()
 
