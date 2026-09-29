@@ -1,13 +1,37 @@
 package dev.example.galaxytabled
 
 import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Path
 import android.os.Bundle
 import android.view.MotionEvent
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.weight
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.text.BasicText
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -41,12 +65,58 @@ class StylusCaptureActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = { context ->
-                    StylusCaptureView(context, HOST, PORT, SESSION_TOKEN).also { captureView = it }
-                }
-            )
+            var connectionMessage by remember { mutableStateOf("Looking for the Windows receiver…") }
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xFFF4F6FA))
+                    .windowInsetsPadding(androidx.compose.foundation.layout.WindowInsets.safeDrawing)
+                    .padding(horizontal = 20.dp, vertical = 12.dp)
+            ) {
+                BasicText(
+                    "S23 Drawing Tablet",
+                    style = TextStyle(fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A))
+                )
+                BasicText(
+                    "Use your S Pen to draw on your Windows PC.",
+                    style = TextStyle(fontSize = 14.sp, color = Color(0xFF536176))
+                )
+                Spacer(Modifier.height(14.dp))
+                BasicText(
+                    connectionMessage,
+                    style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF174A83))
+                )
+                Spacer(Modifier.height(12.dp))
+                BasicText(
+                    "Connect by USB:\n1. Start the Windows receiver:  py .\\host\\tablet_host.py\n2. Connect the phone by USB and approve USB debugging.\n3. On the PC run:  adb reverse tcp:8765 tcp:8765",
+                    style = TextStyle(fontSize = 13.sp, lineHeight = 19.sp, color = Color(0xFF344256))
+                )
+                Spacer(Modifier.height(14.dp))
+                BasicText(
+                    "S Pen drawing area",
+                    style = TextStyle(fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF536176))
+                )
+                Spacer(Modifier.height(8.dp))
+                AndroidView(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Color.White),
+                    factory = { context ->
+                        StylusCaptureView(context, HOST, PORT, SESSION_TOKEN) { connected, message ->
+                            runOnUiThread {
+                                connectionMessage = if (connected) "Connected — ready to draw" else message
+                            }
+                        }.also { captureView = it }
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+                BasicText(
+                    "Draw with the S Pen in the area above. Touches from your finger are ignored.",
+                    style = TextStyle(fontSize = 12.sp, color = Color(0xFF68758A))
+                )
+            }
         }
     }
 
@@ -62,16 +132,40 @@ private class StylusCaptureView(
     context: Context,
     host: String,
     port: Int,
-    token: String
+    token: String,
+    onConnectionState: (Boolean, String) -> Unit
 ) : View(context) {
-    private val sender = TcpPenSender(host, port, token)
+    private val sender = TcpPenSender(host, port, token, onConnectionState)
     private val sequence = AtomicLong(0)
     private var inContact = false
+    private val localStroke = Path()
+    private var hasLocalStroke = false
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.rgb(35, 94, 190)
+        style = Paint.Style.STROKE
+        strokeWidth = 4f * resources.displayMetrics.density
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val hintPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = android.graphics.Color.rgb(139, 151, 168)
+        textAlign = Paint.Align.CENTER
+        textSize = 16f * resources.displayMetrics.density
+    }
 
     init {
+        setBackgroundColor(android.graphics.Color.WHITE)
         isFocusable = true
         isFocusableInTouchMode = true
         contentDescription = "S Pen drawing surface"
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        if (!hasLocalStroke) {
+            canvas.drawText("Move the S Pen here to begin", width / 2f, height / 2f, hintPaint)
+        }
+        canvas.drawPath(localStroke, strokePaint)
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -181,6 +275,17 @@ private class StylusCaptureView(
         orientation: Float,
         timeMs: Long
     ) {
+        when (phase) {
+            "down" -> {
+                localStroke.reset()
+                localStroke.moveTo(x, y)
+                hasLocalStroke = true
+            }
+            "move" -> if (inContact) localStroke.lineTo(x, y)
+            "up", "cancel" -> localStroke.lineTo(x, y)
+        }
+        invalidate()
+
         val nx = if (width > 1) (x / (width - 1)).coerceIn(0f, 1f) else 0f
         val ny = if (height > 1) (y / (height - 1)).coerceIn(0f, 1f) else 0f
         // Android tilt is one angle from perpendicular plus an azimuth. Windows needs X/Y angles.
@@ -220,7 +325,8 @@ private class StylusCaptureView(
 private class TcpPenSender(
     private val host: String,
     private val port: Int,
-    private val token: String
+    private val token: String,
+    private val onConnectionState: (Boolean, String) -> Unit
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val outgoing = Channel<String>(capacity = 512)
@@ -233,6 +339,7 @@ private class TcpPenSender(
             while (isActive) {
                 var socket: Socket? = null
                 try {
+                    onConnectionState(false, "Connecting to $host:$port…")
                     socket = Socket().apply {
                         tcpNoDelay = true
                         connect(InetSocketAddress(host, port), 3000)
@@ -250,6 +357,7 @@ private class TcpPenSender(
                     // Discard any stale samples from a prior session before accepting new events.
                     while (outgoing.tryReceive().isSuccess) { }
                     ready = true
+                    onConnectionState(true, "Connected — ready to draw")
                     backoffMs = 250L
 
                     kotlinx.coroutines.coroutineScope {
@@ -266,7 +374,13 @@ private class TcpPenSender(
                             }
                         }
                     }
-                } catch (_: Exception) {
+                } catch (error: Exception) {
+                    val message = if (error is IllegalStateException) {
+                        "Receiver rejected the connection. Check that the PC and phone use the same app version."
+                    } else {
+                        "Not connected. Start the Windows receiver, then run adb reverse tcp:8765 tcp:8765 on the PC."
+                    }
+                    onConnectionState(false, message)
                     // Reconnect below. The host releases an active pointer when this socket closes.
                 } finally {
                     ready = false

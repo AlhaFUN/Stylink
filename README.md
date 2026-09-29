@@ -6,29 +6,17 @@ Use a Galaxy S23 Ultra S Pen to draw in Windows apps. The Android app sends pen 
 
 - Windows 10 version 1809 or newer
 - Galaxy S23 Ultra and a USB data cable
-- Android Studio with Android SDK Platform 36 installed
+- A GitHub account with this repository's Actions enabled, for building the APK
 - Python 3.10 or newer
 
 The shared authentication token is hardcoded in the Android app and Python host as `MySecretToken123`. You do not need to set environment variables or edit a configuration file.
 
 ## Build and install the Android app
 
-1. Connect the phone to the PC. On the phone, go to **Settings → About phone → Software information**, tap **Build number** seven times, then go back to **Settings → Developer options** and turn on **USB debugging**. Approve the USB debugging prompt when it appears.
-2. Open the `android` folder in Android Studio. Wait for Gradle sync to finish. If Android Studio asks to install Android SDK Platform 36, choose **Install**.
-3. In Android Studio's Terminal, run:
-
-   ```powershell
-   .\gradlew.bat :app:assembleDebug
-   ```
-
-   The installable APK will be created at `android\app\build\outputs\apk\debug\app-debug.apk`.
-4. To install it on the connected phone, run:
-
-   ```powershell
-   .\gradlew.bat :app:installDebug
-   ```
-
-   Or copy `app-debug.apk` to the phone and tap it to install. This is a debug APK for personal use.
+1. Push the project to GitHub. GitHub Actions builds the APK automatically whenever changes are pushed to `main`.
+2. On GitHub, open the repository's **Actions** tab and select the latest successful **Build Android APK** run.
+3. Under **Artifacts**, download **S23-Tablet-App** and unzip it. The APK inside is named `app-debug.apk`.
+4. Copy `app-debug.apk` to your phone and tap it to install. If Android asks, allow installing apps from that file source.
 
 ## Connect over USB and draw
 
