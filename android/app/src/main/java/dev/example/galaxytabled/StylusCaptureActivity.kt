@@ -16,7 +16,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -68,7 +69,8 @@ class StylusCaptureActivity : ComponentActivity() {
                 modifier = Modifier
                     .fillMaxSize()
                     .background(Color(0xFFF4F6FA))
-                    .windowInsetsPadding(androidx.compose.foundation.layout.WindowInsets.safeDrawing)
+                    .statusBarsPadding()
+                    .navigationBarsPadding()
                     .padding(horizontal = 20.dp, vertical = 12.dp)
             ) {
                 BasicText(
