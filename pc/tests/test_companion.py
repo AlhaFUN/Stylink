@@ -160,7 +160,7 @@ class MemoryWriter:
 class PhoneConnectionTests(unittest.IsolatedAsyncioTestCase):
     NONCE = "0123456789abcdef" * 4
     TOKEN = "V" * 43
-    PAIR_CODE = "ABCD2345EFGH"
+    PAIR_CODE = "ABCD2345"
 
     def args(self, *, capture: bool = False) -> Namespace:
         return Namespace(left=10 if capture else None, top=20 if capture else None,

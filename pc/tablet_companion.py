@@ -24,8 +24,8 @@ from pc.pairing import new_session_token, protect_session_token, unprotect_sessi
 from pc.screen_capture import CaptureRect, select_capture_rect
 from pc.tether_network import find_gateway_candidates
 
-APP_NAME = "VirtualDT"
-LEGACY_DATA_FOLDER = "S23DrawingTablet"
+APP_NAME = "Stylink"
+LEGACY_DATA_FOLDERS = ("VirtualDT", "S23DrawingTablet")
 PREVIEW_QUALITY_PRESETS = {
     "Performance": (640, 42),
     "Balanced": (960, 58),
@@ -43,9 +43,10 @@ def app_data_dir() -> Path:
 
 def load_settings() -> dict[str, Any]:
     paths = [app_data_dir() / "settings.json"]
-    legacy_path = app_data_dir().parent / LEGACY_DATA_FOLDER / "settings.json"
-    if legacy_path not in paths:
-        paths.append(legacy_path)
+    for folder in LEGACY_DATA_FOLDERS:
+        legacy_path = app_data_dir().parent / folder / "settings.json"
+        if legacy_path not in paths:
+            paths.append(legacy_path)
     for path in paths:
         try:
             loaded = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
@@ -114,7 +115,7 @@ def save_pairing_token(token: str) -> None:
 
 def app_icon_path() -> Path:
     bundle_root = Path(getattr(sys, "_MEIPASS", PROJECT_ROOT))
-    return bundle_root / "pc" / "assets" / "s23-drawing-tablet.ico"
+    return bundle_root / "pc" / "assets" / "stylink.ico"
 
 
 class TabletCompanion:
@@ -193,7 +194,7 @@ class TabletCompanion:
         for text in (
             "1. Connect the phone and PC with a USB data cable.",
             "2. On the phone, turn on Settings → Connections → Mobile Hotspot and Tethering → USB tethering.",
-            "3. Open VirtualDT on the phone, then click Connect phone below. Pair once with the code shown on the phone.",
+            "3. Open Stylink on the phone, then click Connect phone below. Pair once with the code shown on the phone.",
         ):
             ttk.Label(steps, text=text, style="CardSub.TLabel", wraplength=700).pack(anchor="w", pady=3)
 
@@ -242,7 +243,7 @@ class TabletCompanion:
         self.log = tk.Text(page, height=8, wrap="word", state="disabled", relief="flat", bd=0,
                            bg="#ffffff", fg="#526176", font=("Segoe UI", 9), padx=12, pady=9)
         self.log.pack(fill="both", expand=True)
-        self._append_log("VirtualDT connects over the phone's USB-tether network. It does not use ADB or USB debugging.")
+        self._append_log("Stylink connects over the phone's USB-tether network. It does not use ADB or USB debugging.")
         self._append_log("No inbound firewall rule is needed; the PC connects out to the phone.")
 
     def _append_log(self, message: str) -> None:
@@ -335,7 +336,7 @@ class TabletCompanion:
         self.cancel_setup.clear()
         self.busy = True
         self._refresh_buttons()
-        self.worker_thread = threading.Thread(target=self._connection_worker, name="VirtualDTTetherConnection", daemon=True)
+        self.worker_thread = threading.Thread(target=self._connection_worker, name="StylinkTetherConnection", daemon=True)
         self.worker_thread.start()
 
     def _connection_worker(self) -> None:
@@ -375,16 +376,16 @@ class TabletCompanion:
         if self.running or self.busy:
             self.root.after(100, lambda: self._prompt_pairing(message))
             return
-        prompt = "Enter the 12-character code shown in VirtualDT on your phone. Ignore the dashes; you only need to do this once."
+        prompt = "Enter the 8-character code shown in Stylink on your phone. Ignore the dash; you only need to do this once."
         if message:
             prompt = f"{message}\n\n{prompt}"
-        code = simpledialog.askstring("Pair VirtualDT", prompt, parent=self.root)
+        code = simpledialog.askstring("Pair Stylink", prompt, parent=self.root)
         if code is None:
             self._set_status("Ready to connect", "You can pair this phone later by clicking Connect phone.")
             return
         code = code.strip().upper().replace("-", "").replace(" ", "")
-        if not re.fullmatch(r"[A-HJ-NP-Z2-9]{12}", code):
-            messagebox.showerror("Invalid pairing code", "Enter the 12 characters shown in the phone app.", parent=self.root)
+        if not re.fullmatch(r"[A-HJ-NP-Z2-9]{8}", code):
+            messagebox.showerror("Invalid pairing code", "Enter the 8 characters shown in the phone app.", parent=self.root)
             return
         self.pending_pairing_code = code
         self.pending_pairing_token = new_session_token()
@@ -422,7 +423,7 @@ class TabletCompanion:
             for gateway in tether_gateways:
                 if self.cancel_setup.is_set():
                     break
-                self._post("status", ("Looking for your phone…", f"Checking {gateway.label} for VirtualDT."))
+                self._post("status", ("Looking for your phone…", f"Checking {gateway.label} for Stylink."))
                 try:
                     await tablet_host.connect_to_phone(
                         args,
@@ -445,7 +446,7 @@ class TabletCompanion:
                     raise
                 except Exception:
                     # A gateway is only a candidate. The host confirms the
-                    # VirtualDT greeting before it performs pairing/authentication.
+                    # Stylink greeting before it performs pairing/authentication.
                     continue
             await asyncio.sleep(0.35)
 

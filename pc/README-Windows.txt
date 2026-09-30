@@ -1,11 +1,11 @@
-VirtualDT — Windows companion
+Stylink — Windows companion
 ===============================
 
-1. Install the Android APK and open VirtualDT on your phone.
+1. Install the Android APK and open Stylink on your phone.
 2. Connect the phone to the PC with a USB data cable.
 3. Turn on USB tethering in the phone's Settings.
-4. Open VirtualDT.exe and click Connect phone.
-5. The first time, enter the one-time code shown in the phone app. Future
+4. Open Stylink.exe and click Connect phone.
+5. The first time, enter the 8-character code shown in the phone app. Future
    connections pair automatically.
 
 USB debugging, ADB, Python, and manual firewall commands are not needed. No
@@ -49,5 +49,5 @@ Samsung Galaxy S23 Ultra is tested; other models need hardware testing.
 Some drawing programs may ignore synthetic Windows pen input. Adapter names
 also vary by phone maker and may affect automatic USB tether detection.
 
-This standalone app is built from the open-source VirtualDT project. Python is
+This standalone app is built from the open-source Stylink project. Python is
 not required to run it.

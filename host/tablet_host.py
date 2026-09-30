@@ -301,7 +301,7 @@ async def connect_to_phone(
     on_client_state: Any | None = None,
     timeout: float = 1.0,
 ) -> None:
-    """Connect to VirtualDT, pairing once before using challenge-response auth."""
+    """Connect to Stylink, pairing once before using challenge-response auth."""
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(phone_ip, PORT, limit=MAX_LINE), timeout=timeout
     )
@@ -317,7 +317,7 @@ async def connect_to_phone(
     async def send_screen_preview(writer: asyncio.StreamWriter) -> None:
         from pc.screen_capture import PreviewCapture
 
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="VirtualDT-Capture")
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="Stylink-Capture")
         loop = asyncio.get_running_loop()
         capture = None
         interval = 1.0 / max(1, min(30, int(getattr(args, "preview_fps", 15))))
@@ -387,7 +387,7 @@ async def connect_to_phone(
         if not isinstance(greeting, dict) or any(
             greeting.get(key) != value for key, value in SERVICE_GREETING.items()
         ):
-            raise ValueError("network device did not identify as the VirtualDT app")
+            raise ValueError("network device did not identify as the Stylink app")
 
         nonce = greeting.get("nonce")
         if not isinstance(nonce, str) or len(nonce) != 64:
@@ -415,7 +415,7 @@ async def connect_to_phone(
         elif is_paired is False:
             code = str(getattr(args, "pairing_code", "") or "").strip().upper().replace("-", "")
             if not code:
-                raise PairingCodeRequired("Enter the one-time code shown in VirtualDT on the phone.")
+                raise PairingCodeRequired("Enter the one-time code shown in Stylink on the phone.")
             if not verify_auth_proof(code, nonce, str(greeting.get("proof", ""))):
                 raise PairingRejected("This connection did not prove the one-time code shown on the phone.")
             pairing_token = getattr(args, "new_pairing_token", None) or new_session_token()
@@ -440,7 +440,7 @@ async def connect_to_phone(
                 raise PairingRejected("That code did not match. Check the code shown on the phone and try again.")
             raise ValueError("phone rejected this PC. Reset pairing on the phone if you changed PCs.")
         if not isinstance(response, dict) or response.get("type") != "ready" or response.get("v") != PROTOCOL_VERSION:
-            raise ValueError("phone rejected the session; install matching VirtualDT app releases")
+            raise ValueError("phone rejected the session; install matching Stylink app releases")
 
         if is_new_pairing and callable(getattr(args, "on_pairing_established", None)):
             args.on_pairing_established(pairing_token)

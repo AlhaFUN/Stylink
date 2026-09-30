@@ -33,24 +33,24 @@ jobs:
       - name: Build Windows app
         run: >-
           python -m PyInstaller --noconfirm --clean --onefile --windowed
-          --icon pc/assets/s23-drawing-tablet.ico
-          --add-data "pc/assets/s23-drawing-tablet.ico;pc/assets"
+          --icon pc/assets/stylink.ico
+          --add-data "pc/assets/stylink.ico;pc/assets"
           --collect-all mss --collect-all PIL
-          --paths . --name VirtualDT --distpath release
+          --paths . --name Stylink --distpath release
           pc/tablet_companion.py
 
       - name: Assemble simple Windows setup files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release\setup | Out-Null
-          Copy-Item release\VirtualDT.exe release\setup\
+          Copy-Item release\Stylink.exe release\setup\
           Copy-Item pc\README-Windows.txt release\setup\README.txt
           Copy-Item LICENSE release\setup\
 
       - name: Upload Windows setup
         uses: actions/upload-artifact@v4
         with:
-          name: VirtualDT-PC-Setup
+          name: Stylink-PC-Setup
           path: release/setup/*
           if-no-files-found: error
           retention-days: 30

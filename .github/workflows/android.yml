@@ -31,5 +31,5 @@ jobs:
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: VirtualDT-Android
+          name: Stylink-Android
           path: android/app/build/outputs/apk/debug/*.apk

@@ -167,7 +167,7 @@ class StylusCaptureActivity : ComponentActivity() {
                         }
                         Spacer(Modifier.width(12.dp))
                         Column {
-                            BasicText("VirtualDT", style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A)))
+                            BasicText("Stylink", style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A)))
                             BasicText("Your Android stylus, on your Windows PC", style = TextStyle(fontSize = 13.sp, color = Color(0xFF64748B)))
                         }
                     }
@@ -194,7 +194,7 @@ class StylusCaptureActivity : ComponentActivity() {
                         } else {
                             BasicText("When the PC app asks, enter this one-time code:", style = TextStyle(fontSize = 12.sp, color = Color(0xFF42556E)))
                             BasicText(
-                                pairingCode.chunked(4).joinToString("-").ifBlank { "---- ---- ----" },
+                                pairingCode.chunked(4).joinToString("-").ifBlank { "---- ----" },
                                 style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1D5FBF))
                             )
                         }
@@ -526,7 +526,7 @@ private class StylusCaptureView(
 private fun newPairingCode(): String {
     val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
     val random = SecureRandom()
-    return buildString { repeat(12) { append(alphabet[random.nextInt(alphabet.length)]) } }
+    return buildString { repeat(8) { append(alphabet[random.nextInt(alphabet.length)]) } }
 }
 
 private fun newChallenge(): String {
@@ -550,7 +550,7 @@ private fun decodeHex(value: String): ByteArray? {
 }
 
 private fun makeAuthProof(token: String, nonceHex: String): String {
-    val nonce = decodeHex(nonceHex) ?: throw IllegalArgumentException("Invalid VirtualDT authentication challenge.")
+    val nonce = decodeHex(nonceHex) ?: throw IllegalArgumentException("Invalid Stylink authentication challenge.")
     val mac = Mac.getInstance("HmacSHA256")
     mac.init(SecretKeySpec(token.toByteArray(Charsets.UTF_8), "HmacSHA256"))
     return mac.doFinal(nonce).toHexString()
@@ -640,7 +640,7 @@ private class TetherTcpLink(
             val request = JSONObject(hello)
             if (request.optInt("v") != PROTOCOL_VERSION) {
                 writeLine(output, JSONObject().put("type", "error").put("message", "protocol_mismatch").toString())
-                throw IllegalStateException("PC app protocol does not match. Install matching VirtualDT releases.")
+                throw IllegalStateException("PC app protocol does not match. Install matching Stylink releases.")
             }
 
             if (tokenAtGreeting == null && request.optString("type") == "pair") {
@@ -648,7 +648,7 @@ private class TetherTcpLink(
                 val proposedToken = request.optString("token", "")
                 if (suppliedCode != pairingCode || !proposedToken.matches(Regex("[A-Za-z0-9_-]{40,64}"))) {
                     writeLine(output, JSONObject().put("type", "error").put("message", "pairing_code_invalid").toString())
-                    throw IllegalStateException("VirtualDT pairing code was rejected.")
+                    throw IllegalStateException("Stylink pairing code was rejected.")
                 }
                 pairingStore.saveToken(proposedToken)
                 sessionToken = proposedToken
@@ -662,11 +662,11 @@ private class TetherTcpLink(
                 )
                 if (!valid) {
                     writeLine(output, JSONObject().put("type", "error").put("message", "unauthorized").toString())
-                    throw IllegalStateException("VirtualDT PC authentication failed.")
+                    throw IllegalStateException("Stylink PC authentication failed.")
                 }
             } else {
                 writeLine(output, JSONObject().put("type", "error").put("message", "unauthorized").toString())
-                throw IllegalStateException("VirtualDT PC pairing state does not match.")
+                throw IllegalStateException("Stylink PC pairing state does not match.")
             }
 
             outgoing.clear()

@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "VirtualDT"
+rootProject.name = "Stylink"
 include(":app")

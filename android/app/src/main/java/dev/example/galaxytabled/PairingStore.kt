@@ -46,14 +46,14 @@ internal class PairingStore(context: Context) {
             .put(encrypted)
             .array()
         if (!preferences.edit().putString(TOKEN_KEY, Base64.encodeToString(stored, Base64.NO_WRAP)).commit()) {
-            throw IllegalStateException("Could not save the VirtualDT pairing securely.")
+            throw IllegalStateException("Could not save the Stylink pairing securely.")
         }
     }
 
     @Synchronized
     fun clear() {
         if (!preferences.edit().remove(TOKEN_KEY).commit()) {
-            throw IllegalStateException("Could not reset the VirtualDT pairing.")
+            throw IllegalStateException("Could not reset the Stylink pairing.")
         }
     }
 

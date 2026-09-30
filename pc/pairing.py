@@ -12,7 +12,7 @@ from ctypes import wintypes
 
 
 def new_session_token() -> str:
-    """Create a high-entropy key unique to one VirtualDT pairing."""
+    """Create a high-entropy key unique to one Stylink pairing."""
     return secrets.token_urlsafe(32)
 
 
@@ -68,7 +68,7 @@ def _dpapi(data: bytes, *, protect: bool) -> bytes:
     result_blob = _DataBlob()
     if protect:
         ok = crypt32.CryptProtectData(
-            ctypes.byref(source_blob), "VirtualDT session key", None, None,
+            ctypes.byref(source_blob), "Stylink session key", None, None,
             None, 0x1, ctypes.byref(result_blob),
         )
     else:
