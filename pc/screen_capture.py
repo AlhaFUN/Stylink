@@ -1,4 +1,4 @@
-"""Screen-region selection and low-rate preview frames for the phone app."""
+"""Screen-region selection and efficient JPEG preview capture."""
 
 from __future__ import annotations
 
@@ -26,23 +26,61 @@ class CaptureRect:
         return {"left": self.left, "top": self.top, "width": self.width, "height": self.height}
 
 
-def jpeg_preview(rect: CaptureRect, *, max_width: int = 1280, quality: int = 58) -> tuple[bytes, int, int]:
-    """Capture one cropped desktop frame and return JPEG bytes and encoded size."""
-    try:
-        import mss
-        from PIL import Image
-    except ImportError as error:
-        raise RuntimeError("Screen preview support is missing from this PC app build.") from error
+class PreviewCapture:
+    """Keep one MSS capture session alive while preview frames are produced."""
 
-    with mss.mss() as capture:
-        shot = capture.grab(rect.as_dict())
-    image = Image.frombytes("RGB", shot.size, shot.rgb)
-    if image.width > max_width:
-        height = max(1, round(image.height * max_width / image.width))
-        image = image.resize((max_width, height), Image.Resampling.BILINEAR)
-    output = BytesIO()
-    image.save(output, format="JPEG", quality=quality, optimize=False)
-    return output.getvalue(), image.width, image.height
+    def __init__(self) -> None:
+        try:
+            import mss
+        except ImportError as error:
+            raise RuntimeError("Screen preview support is missing from this PC app build.") from error
+        self._capture = mss.mss()
+
+    def capture(
+        self,
+        rect: CaptureRect,
+        *,
+        max_width: int = 960,
+        quality: int = 58,
+    ) -> tuple[bytes, int, int]:
+        """Capture only the selected region, scale, and encode it as JPEG."""
+        try:
+            from PIL import Image
+        except ImportError as error:
+            raise RuntimeError("Screen preview support is missing from this PC app build.") from error
+
+        shot = self._capture.grab(rect.as_dict())
+        # MSS exposes BGRA directly; Pillow can discard alpha during decode,
+        # avoiding the extra full-frame RGB byte copy made by shot.rgb.
+        image = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
+        if image.width > max_width:
+            height = max(1, round(image.height * max_width / image.width))
+            image = image.resize((max_width, height), Image.Resampling.BILINEAR)
+        output = BytesIO()
+        image.save(
+            output,
+            format="JPEG",
+            quality=max(30, min(90, int(quality))),
+            optimize=False,
+            progressive=False,
+            subsampling=1,
+        )
+        return output.getvalue(), image.width, image.height
+
+    def close(self) -> None:
+        self._capture.close()
+
+
+def jpeg_preview(rect: CaptureRect, *, max_width: int = 960, quality: int = 58) -> tuple[bytes, int, int]:
+    """Capture one JPEG frame for callers that do not keep a capture session."""
+    try:
+        capture = PreviewCapture()
+    except RuntimeError:
+        raise
+    try:
+        return capture.capture(rect, max_width=max_width, quality=quality)
+    finally:
+        capture.close()
 
 
 def select_capture_rect(root: Any, on_selected: Callable[[CaptureRect | None], None]) -> None:

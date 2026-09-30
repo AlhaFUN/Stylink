@@ -1,4 +1,4 @@
-"""Friendly Windows companion app for USB-tethered S Pen drawing."""
+"""Friendly Windows companion app for USB-tethered Android stylus input."""
 
 from __future__ import annotations
 
@@ -6,12 +6,13 @@ import asyncio
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import tkinter as tk
 from argparse import Namespace
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 from typing import Any
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -19,24 +20,56 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from host import tablet_host
+from pc.pairing import new_session_token, protect_session_token, unprotect_session_token
 from pc.screen_capture import CaptureRect, select_capture_rect
 from pc.tether_network import find_gateway_candidates
 
-APP_NAME = "S23 Drawing Tablet"
+APP_NAME = "VirtualDT"
+LEGACY_DATA_FOLDER = "S23DrawingTablet"
+PREVIEW_QUALITY_PRESETS = {
+    "Performance": (640, 42),
+    "Balanced": (960, 58),
+    "High detail": (1280, 76),
+}
+PREVIEW_FPS_OPTIONS = (5, 10, 15, 20, 30)
 
 
 def app_data_dir() -> Path:
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
-    folder = Path(base) / "S23DrawingTablet"
+    folder = Path(base) / APP_NAME
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
+def load_settings() -> dict[str, Any]:
+    paths = [app_data_dir() / "settings.json"]
+    legacy_path = app_data_dir().parent / LEGACY_DATA_FOLDER / "settings.json"
+    if legacy_path not in paths:
+        paths.append(legacy_path)
+    for path in paths:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+            if isinstance(loaded, dict):
+                return loaded
+        except (OSError, json.JSONDecodeError):
+            continue
+    return {}
+
+
+def save_settings(settings: dict[str, Any]) -> None:
+    path = app_data_dir() / "settings.json"
+    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def update_settings(**values: Any) -> None:
+    settings = load_settings()
+    settings.update(values)
+    save_settings(settings)
+
+
 def load_capture_rect() -> CaptureRect | None:
     try:
-        path = app_data_dir() / "settings.json"
-        settings = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-        raw = settings.get("capture_rect") if isinstance(settings, dict) else None
+        raw = load_settings().get("capture_rect")
         if isinstance(raw, dict):
             rect = CaptureRect(int(raw["left"]), int(raw["top"]), int(raw["width"]), int(raw["height"]))
             if rect.width >= 32 and rect.height >= 32:
@@ -47,20 +80,36 @@ def load_capture_rect() -> CaptureRect | None:
 
 
 def save_capture_rect(rect: CaptureRect | None) -> None:
-    path = app_data_dir() / "settings.json"
-    settings: dict[str, Any] = {}
-    if path.exists():
-        try:
-            parsed = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(parsed, dict):
-                settings = parsed
-        except (OSError, json.JSONDecodeError):
-            pass
+    settings = load_settings()
     if rect is None:
         settings.pop("capture_rect", None)
     else:
         settings["capture_rect"] = rect.as_dict()
-    path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    save_settings(settings)
+
+
+def load_preview_settings() -> tuple[str, int]:
+    settings = load_settings()
+    quality = settings.get("preview_quality", "Balanced")
+    fps = settings.get("preview_fps", 15)
+    if quality not in PREVIEW_QUALITY_PRESETS:
+        quality = "Balanced"
+    try:
+        fps = int(fps)
+    except (TypeError, ValueError):
+        fps = 15
+    if fps not in PREVIEW_FPS_OPTIONS:
+        fps = 15
+    return quality, fps
+
+
+def load_pairing_token() -> str | None:
+    protected = load_settings().get("pairing_token")
+    return unprotect_session_token(protected) if isinstance(protected, str) else None
+
+
+def save_pairing_token(token: str) -> None:
+    update_settings(pairing_token=protect_session_token(token))
 
 
 def app_icon_path() -> Path:
@@ -71,9 +120,9 @@ def app_icon_path() -> Path:
 class TabletCompanion:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title(f"{APP_NAME} — Windows app")
-        self.root.geometry("790x760")
-        self.root.minsize(700, 700)
+        self.root.title(f"{APP_NAME} — Windows companion")
+        self.root.geometry("790x800")
+        self.root.minsize(700, 740)
         self.root.configure(bg="#f3f6fb")
         self.root.option_add("*Font", ("Segoe UI", 10))
 
@@ -85,6 +134,10 @@ class TabletCompanion:
         self.cancel_setup = threading.Event()
         self.worker_thread: threading.Thread | None = None
         self.capture_rect = load_capture_rect()
+        self.preview_quality, self.preview_fps = load_preview_settings()
+        self.pairing_token = load_pairing_token()
+        self.pending_pairing_code: str | None = None
+        self.pending_pairing_token: str | None = None
 
         self._build_ui()
         self._refresh_buttons()
@@ -112,12 +165,12 @@ class TabletCompanion:
         page.pack(fill="both", expand=True)
         hero = ttk.Frame(page, style="Hero.TFrame", padding=(22, 18))
         hero.pack(fill="x")
-        logo = tk.Label(hero, text="S23", bg="#2b75d6", fg="white", font=("Segoe UI", 12, "bold"), padx=10, pady=8)
+        logo = tk.Label(hero, text="VDT", bg="#2b75d6", fg="white", font=("Segoe UI", 12, "bold"), padx=10, pady=8)
         logo.pack(side="left", padx=(0, 15))
         title_box = ttk.Frame(hero, style="Hero.TFrame")
         title_box.pack(side="left", fill="x", expand=True)
         ttk.Label(title_box, text=APP_NAME, style="HeroTitle.TLabel").pack(anchor="w")
-        ttk.Label(title_box, text="Your Galaxy S Pen, now a Windows drawing pen.", style="HeroSub.TLabel").pack(anchor="w", pady=(3, 0))
+        ttk.Label(title_box, text="Your Android stylus, now a Windows drawing pen.", style="HeroSub.TLabel").pack(anchor="w", pady=(3, 0))
 
         status_card = ttk.Frame(page, style="Card.TFrame", padding=(18, 16))
         status_card.pack(fill="x", pady=(16, 13))
@@ -129,7 +182,7 @@ class TabletCompanion:
         ttk.Label(top_line, textvariable=self.status_var, style="Status.TLabel").pack(side="left", anchor="w")
         self.status_detail = ttk.Label(
             status_card,
-            text="Connect your phone by USB, turn on USB tethering, then click Connect phone.",
+            text="Connect your Android device by USB, turn on USB tethering, then click Connect phone.",
             style="CardSub.TLabel", wraplength=680,
         )
         self.status_detail.pack(anchor="w", padx=(25, 0), pady=(5, 0))
@@ -140,7 +193,7 @@ class TabletCompanion:
         for text in (
             "1. Connect the phone and PC with a USB data cable.",
             "2. On the phone, turn on Settings → Connections → Mobile Hotspot and Tethering → USB tethering.",
-            "3. Open the phone app, then click Connect phone below.",
+            "3. Open VirtualDT on the phone, then click Connect phone below. Pair once with the code shown on the phone.",
         ):
             ttk.Label(steps, text=text, style="CardSub.TLabel", wraplength=700).pack(anchor="w", pady=3)
 
@@ -156,6 +209,32 @@ class TabletCompanion:
         ttk.Label(page, textvariable=self.capture_var, style="Sub.TLabel", wraplength=700).pack(anchor="w", pady=(0, 10))
         self._update_capture_label()
 
+        preview_options = ttk.Frame(page, style="Card.TFrame", padding=(13, 10))
+        preview_options.pack(fill="x", pady=(0, 11))
+        options_row = ttk.Frame(preview_options, style="Card.TFrame")
+        options_row.pack(fill="x")
+        ttk.Label(options_row, text="Image quality", style="CardTitle.TLabel").pack(side="left")
+        self.quality_var = tk.StringVar(value=self.preview_quality)
+        self.quality_combo = ttk.Combobox(
+            options_row, textvariable=self.quality_var,
+            values=tuple(PREVIEW_QUALITY_PRESETS), state="readonly", width=15,
+        )
+        self.quality_combo.pack(side="left", padx=(8, 24))
+        self.quality_combo.bind("<<ComboboxSelected>>", self._on_preview_settings_changed)
+        ttk.Label(options_row, text="FPS limit", style="CardTitle.TLabel").pack(side="left")
+        self.fps_var = tk.StringVar(value=str(self.preview_fps))
+        self.fps_combo = ttk.Combobox(
+            options_row, textvariable=self.fps_var,
+            values=tuple(str(value) for value in PREVIEW_FPS_OPTIONS), state="readonly", width=7,
+        )
+        self.fps_combo.pack(side="left", padx=(8, 0))
+        self.fps_combo.bind("<<ComboboxSelected>>", self._on_preview_settings_changed)
+        ttk.Label(
+            preview_options,
+            text="Performance uses a smaller, lighter preview. Changes apply the next time you connect.",
+            style="CardSub.TLabel",
+        ).pack(anchor="w", pady=(7, 0))
+
         activity_head = ttk.Frame(page, style="Page.TFrame")
         activity_head.pack(fill="x", pady=(1, 5))
         ttk.Label(activity_head, text="Activity", style="Section.TLabel").pack(side="left")
@@ -163,7 +242,7 @@ class TabletCompanion:
         self.log = tk.Text(page, height=8, wrap="word", state="disabled", relief="flat", bd=0,
                            bg="#ffffff", fg="#526176", font=("Segoe UI", 9), padx=12, pady=9)
         self.log.pack(fill="both", expand=True)
-        self._append_log("This app connects over the phone's USB-tether network. It does not use ADB or USB debugging.")
+        self._append_log("VirtualDT connects over the phone's USB-tether network. It does not use ADB or USB debugging.")
         self._append_log("No inbound firewall rule is needed; the PC connects out to the phone.")
 
     def _append_log(self, message: str) -> None:
@@ -185,6 +264,28 @@ class TabletCompanion:
             return
         self.connect_button.configure(text="Disconnect" if self.running else "Connect phone")
         self.connect_button.configure(state="disabled" if self.busy else "normal")
+        for control in (getattr(self, "quality_combo", None), getattr(self, "fps_combo", None)):
+            if control is not None:
+                control.configure(state="disabled" if self.running else "readonly")
+
+    def _on_preview_settings_changed(self, _event: Any = None) -> None:
+        if self.running:
+            return
+        quality = self.quality_var.get()
+        try:
+            fps = int(self.fps_var.get())
+        except ValueError:
+            return
+        if quality not in PREVIEW_QUALITY_PRESETS or fps not in PREVIEW_FPS_OPTIONS:
+            return
+        self.preview_quality, self.preview_fps = quality, fps
+        try:
+            update_settings(preview_quality=quality, preview_fps=fps)
+        except OSError as error:
+            messagebox.showerror("Could not save preview settings", str(error), parent=self.root)
+            return
+        max_width, jpeg_quality = PREVIEW_QUALITY_PRESETS[quality]
+        self._append_log(f"Preview set to {quality.lower()} ({max_width}px, JPEG {jpeg_quality}) at up to {fps} FPS.")
 
     def _choose_capture_area(self) -> None:
         if self.running:
@@ -220,7 +321,7 @@ class TabletCompanion:
             rect = self.capture_rect
             self.capture_var.set(f"Showing {rect.width} × {rect.height} pixels at ({rect.left}, {rect.top}) on the phone.")
         else:
-            self.capture_var.set("No preview selected. The S Pen maps across the full Windows desktop.")
+            self.capture_var.set("No preview selected. The Android stylus maps across the full Windows desktop.")
 
     def _toggle_connection(self) -> None:
         if self.busy:
@@ -234,7 +335,7 @@ class TabletCompanion:
         self.cancel_setup.clear()
         self.busy = True
         self._refresh_buttons()
-        self.worker_thread = threading.Thread(target=self._connection_worker, name="S23TetherConnection", daemon=True)
+        self.worker_thread = threading.Thread(target=self._connection_worker, name="VirtualDTTetherConnection", daemon=True)
         self.worker_thread.start()
 
     def _connection_worker(self) -> None:
@@ -245,6 +346,13 @@ class TabletCompanion:
             top=rect.top if rect else None,
             width=rect.width if rect else None,
             height=rect.height if rect else None,
+            preview_max_width=PREVIEW_QUALITY_PRESETS[self.preview_quality][0],
+            preview_quality=PREVIEW_QUALITY_PRESETS[self.preview_quality][1],
+            preview_fps=self.preview_fps,
+            pairing_token=self.pairing_token,
+            pairing_code=self.pending_pairing_code,
+            new_pairing_token=self.pending_pairing_token,
+            on_pairing_established=self._pairing_established,
         )
         failure: str | None = None
         try:
@@ -253,6 +361,34 @@ class TabletCompanion:
             failure = str(error)
         finally:
             self._post("stopped", failure)
+
+    def _pairing_established(self, token: str) -> None:
+        save_pairing_token(token)
+        self.pairing_token = token
+        self.pending_pairing_code = None
+        self.pending_pairing_token = None
+        self._post("paired")
+
+    def _prompt_pairing(self, message: str | None = None) -> None:
+        if self.closing:
+            return
+        if self.running or self.busy:
+            self.root.after(100, lambda: self._prompt_pairing(message))
+            return
+        prompt = "Enter the 12-character code shown in VirtualDT on your phone. Ignore the dashes; you only need to do this once."
+        if message:
+            prompt = f"{message}\n\n{prompt}"
+        code = simpledialog.askstring("Pair VirtualDT", prompt, parent=self.root)
+        if code is None:
+            self._set_status("Ready to connect", "You can pair this phone later by clicking Connect phone.")
+            return
+        code = code.strip().upper().replace("-", "").replace(" ", "")
+        if not re.fullmatch(r"[A-HJ-NP-Z2-9]{12}", code):
+            messagebox.showerror("Invalid pairing code", "Enter the 12 characters shown in the phone app.", parent=self.root)
+            return
+        self.pending_pairing_code = code
+        self.pending_pairing_token = new_session_token()
+        self._toggle_connection()
 
     async def _connection_loop(self, args: Namespace) -> None:
         last_message = ""
@@ -286,7 +422,7 @@ class TabletCompanion:
             for gateway in tether_gateways:
                 if self.cancel_setup.is_set():
                     break
-                self._post("status", ("Looking for your phone…", f"Checking {gateway.label} for the S23 Drawing Tablet app."))
+                self._post("status", ("Looking for your phone…", f"Checking {gateway.label} for VirtualDT."))
                 try:
                     await tablet_host.connect_to_phone(
                         args,
@@ -297,9 +433,19 @@ class TabletCompanion:
                     )
                 except asyncio.CancelledError:
                     raise
+                except tablet_host.PairingCodeRequired:
+                    self._post("pairing_required")
+                    return
+                except tablet_host.PairingRejected as error:
+                    self.pending_pairing_code = None
+                    self.pending_pairing_token = None
+                    self._post("pairing_retry", str(error))
+                    return
+                except tablet_host.PairingMismatch:
+                    raise
                 except Exception:
-                    # A gateway is only a candidate. The host validates the phone
-                    # service greeting before it sends the session token.
+                    # A gateway is only a candidate. The host confirms the
+                    # VirtualDT greeting before it performs pairing/authentication.
                     continue
             await asyncio.sleep(0.35)
 
@@ -337,11 +483,17 @@ class TabletCompanion:
                 connected, peer = value
                 self.pen_connected = connected
                 if connected:
-                    self._set_status("Connected — ready to draw", "S Pen input is active. Draw on the phone or select a PC screen area to preview.", connected=True)
-                    self._append_log("Phone connected. S Pen input is ready.")
+                    self._set_status("Connected — ready to draw", "Stylus input is active. Draw on the Android device or select a PC screen area to preview.", connected=True)
+                    self._append_log("Android device connected. Stylus input is ready.")
                 elif self.running and not self.cancel_setup.is_set():
                     self._set_status("Phone disconnected. Reconnecting…", "Check the USB cable and make sure USB tethering stays on.", searching=True)
                     self._append_log("Phone link ended; searching again.")
+            elif kind == "pairing_required":
+                self.root.after(0, self._prompt_pairing)
+            elif kind == "pairing_retry":
+                self.root.after(0, lambda message=value: self._prompt_pairing(message))
+            elif kind == "paired":
+                self._append_log("Pairing key saved. Future connections authenticate automatically.")
             elif kind == "log":
                 self._append_log(value)
             elif kind == "stopped":

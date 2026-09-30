@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "s23-drawing-tablet"
+rootProject.name = "VirtualDT"
 include(":app")

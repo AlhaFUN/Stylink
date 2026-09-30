@@ -9,7 +9,6 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Path
 import android.os.Bundle
-import android.util.Base64
 import android.view.MotionEvent
 import android.view.View
 import androidx.activity.ComponentActivity
@@ -50,10 +49,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.BufferedWriter
+import java.io.ByteArrayOutputStream
+import java.io.DataInputStream
 import java.io.OutputStreamWriter
-import java.io.BufferedReader
-import java.io.InputStreamReader
 import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -62,18 +62,22 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
 import java.net.SocketTimeoutException
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicLong
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-/** Must match the Windows receiver's first-session authentication token. */
-private const val SESSION_TOKEN = "MySecretToken123"
 private const val TETHER_PORT = 8765
-private const val MAX_PROTOCOL_LINE = 4 * 1024 * 1024
+private const val PROTOCOL_VERSION = 2
+private const val MAX_PROTOCOL_LINE = 64 * 1024
+private const val MAX_SCREEN_FRAME_BYTES = 16 * 1024 * 1024
 
 class StylusCaptureActivity : ComponentActivity() {
     private var captureView: StylusCaptureView? = null
@@ -85,18 +89,30 @@ class StylusCaptureActivity : ComponentActivity() {
         setContent {
             var connectionMessage by remember { mutableStateOf("Turn on USB tethering, then open the PC app and tap Connect phone.") }
             var fullScreen by remember { mutableStateOf(false) }
+            var pairedToPc by remember { mutableStateOf(false) }
+            var pairingCode by remember { mutableStateOf("") }
             val link = remember {
                 TetherTcpLink(
-                    token = SESSION_TOKEN,
+                    context = applicationContext,
                     onConnectionState = { connected, message ->
                         runOnUiThread {
                             connectionMessage = if (connected) "Connected — ready to draw" else message
                         }
                     },
+                    onPairingState = { paired, code ->
+                        runOnUiThread {
+                            pairedToPc = paired
+                            pairingCode = code
+                        }
+                    },
                     onScreenFrame = { bitmap ->
                         runOnUiThread {
+                            val previousFrame = latestDesktopFrame
                             latestDesktopFrame = bitmap
                             captureView?.setDesktopFrame(bitmap)
+                            if (previousFrame != null && previousFrame !== bitmap && !previousFrame.isRecycled) {
+                                previousFrame.recycle()
+                            }
                         }
                     }
                 ).also { tetherLink = it }
@@ -147,12 +163,40 @@ class StylusCaptureActivity : ComponentActivity() {
                                 .background(Color(0xFF1D5FBF)),
                             contentAlignment = Alignment.Center
                         ) {
-                            BasicText("S", style = TextStyle(fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color.White))
+                            BasicText("V", style = TextStyle(fontSize = 25.sp, fontWeight = FontWeight.Bold, color = Color.White))
                         }
                         Spacer(Modifier.width(12.dp))
                         Column {
-                            BasicText("S23 Drawing Tablet", style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A)))
-                            BasicText("Your S Pen, on your Windows PC", style = TextStyle(fontSize = 13.sp, color = Color(0xFF64748B)))
+                            BasicText("VirtualDT", style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF17243A)))
+                            BasicText("Your Android stylus, on your Windows PC", style = TextStyle(fontSize = 13.sp, color = Color(0xFF64748B)))
+                        }
+                    }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(18.dp))
+                            .background(Color(0xFFE8EFF9))
+                            .padding(horizontal = 14.dp, vertical = 11.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        BasicText(
+                            if (pairedToPc) "PC paired" else "Pair your PC once",
+                            style = TextStyle(fontSize = 13.sp, fontWeight = FontWeight.Bold, color = Color(0xFF25436B))
+                        )
+                        if (pairedToPc) {
+                            BasicText("The paired session key stays encrypted on this phone and the PC.", style = TextStyle(fontSize = 12.sp, color = Color(0xFF42556E)))
+                            BasicText(
+                                "Reset pairing",
+                                modifier = Modifier.clickable { link.resetPairing() }.padding(vertical = 3.dp),
+                                style = TextStyle(fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF1D5FBF))
+                            )
+                        } else {
+                            BasicText("When the PC app asks, enter this one-time code:", style = TextStyle(fontSize = 12.sp, color = Color(0xFF42556E)))
+                            BasicText(
+                                pairingCode.chunked(4).joinToString("-").ifBlank { "---- ---- ----" },
+                                style = TextStyle(fontSize = 22.sp, fontWeight = FontWeight.Bold, color = Color(0xFF1D5FBF))
+                            )
                         }
                     }
 
@@ -209,7 +253,7 @@ class StylusCaptureActivity : ComponentActivity() {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
                             BasicText("Drawing pad", style = TextStyle(fontSize = 15.sp, fontWeight = FontWeight.Bold, color = Color(0xFF25354B)))
-                            BasicText("S Pen only · PC screen preview appears here", style = TextStyle(fontSize = 11.sp, color = Color(0xFF758196)))
+                            BasicText("Android stylus · PC screen preview appears here", style = TextStyle(fontSize = 11.sp, color = Color(0xFF758196)))
                         }
                         BasicText(
                             "FULL SCREEN",
@@ -236,7 +280,7 @@ class StylusCaptureActivity : ComponentActivity() {
                             }
                         }
                     )
-                    BasicText("Finger touches are ignored. Hold the S Pen near the pad to move the cursor.", style = TextStyle(fontSize = 11.sp, color = Color(0xFF758196), textAlign = TextAlign.Center))
+                    BasicText("Finger touches are ignored. Use a stylus supported by your Android device.", style = TextStyle(fontSize = 11.sp, color = Color(0xFF758196), textAlign = TextAlign.Center))
                 }
             }
         }
@@ -267,6 +311,8 @@ class StylusCaptureActivity : ComponentActivity() {
         captureView = null
         tetherLink?.close()
         tetherLink = null
+        latestDesktopFrame?.let { if (!it.isRecycled) it.recycle() }
+        latestDesktopFrame = null
         super.onDestroy()
     }
 }
@@ -298,7 +344,7 @@ private class StylusCaptureView(
         setBackgroundColor(android.graphics.Color.WHITE)
         isFocusable = true
         isFocusableInTouchMode = true
-        contentDescription = "S Pen drawing surface"
+        contentDescription = "Android stylus drawing surface"
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -307,7 +353,7 @@ private class StylusCaptureView(
         if (frame != null) {
             canvas.drawBitmap(frame, null, android.graphics.Rect(0, 0, width, height), null)
         } else if (!hasLocalStroke) {
-            canvas.drawText("Move the S Pen here to begin", width / 2f, height / 2f, hintPaint)
+            canvas.drawText("Move your stylus here to begin", width / 2f, height / 2f, hintPaint)
         }
         canvas.drawPath(localStroke, strokePaint)
     }
@@ -413,6 +459,16 @@ private class StylusCaptureView(
         )
     }
 
+    private fun normalizePressure(event: MotionEvent, pressure: Float): Float {
+        val device = event.device
+        val range = device?.getMotionRange(MotionEvent.AXIS_PRESSURE, event.source)
+            ?: device?.getMotionRange(MotionEvent.AXIS_PRESSURE)
+        val min = range?.min ?: 0f
+        val max = range?.max ?: 1f
+        val scaled = if (max > min) (pressure - min) / (max - min) else pressure
+        return scaled.coerceIn(0f, 1f)
+    }
+
     private fun emit(
         event: MotionEvent,
         pointer: Int,
@@ -444,11 +500,8 @@ private class StylusCaptureView(
         val buttons = event.buttonState
         val primaryButton = (buttons and MotionEvent.BUTTON_STYLUS_PRIMARY) != 0
         val secondaryButton = (buttons and MotionEvent.BUTTON_STYLUS_SECONDARY) != 0
-        val normalizedPressure = if (phase == "up" || phase == "leave" || phase == "cancel") {
-            0f
-        } else {
-            pressure.coerceIn(0f, 1f)
-        }
+        val normalizedPressure = if (phase == "up" || phase == "leave" || phase == "cancel") 0f
+        else normalizePressure(event, pressure)
 
         sendPacket(
             JSONObject()
@@ -470,12 +523,49 @@ private class StylusCaptureView(
     fun close() = Unit
 }
 
+private fun newPairingCode(): String {
+    val alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    val random = SecureRandom()
+    return buildString { repeat(12) { append(alphabet[random.nextInt(alphabet.length)]) } }
+}
+
+private fun newChallenge(): String {
+    val bytes = ByteArray(32)
+    SecureRandom().nextBytes(bytes)
+    return bytes.toHexString()
+}
+
+private fun ByteArray.toHexString(): String = buildString(size * 2) {
+    val digits = "0123456789abcdef"
+    for (byte in this@toHexString) {
+        val value = byte.toInt() and 0xff
+        append(digits[value ushr 4])
+        append(digits[value and 0x0f])
+    }
+}
+
+private fun decodeHex(value: String): ByteArray? {
+    if (value.length != 64 || value.any { it !in "0123456789abcdefABCDEF" }) return null
+    return ByteArray(32) { index -> value.substring(index * 2, index * 2 + 2).toInt(16).toByte() }
+}
+
+private fun makeAuthProof(token: String, nonceHex: String): String {
+    val nonce = decodeHex(nonceHex) ?: throw IllegalArgumentException("Invalid VirtualDT authentication challenge.")
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(token.toByteArray(Charsets.UTF_8), "HmacSHA256"))
+    return mac.doFinal(nonce).toHexString()
+}
+
 /** Hosts the pen service only on Android's USB-tether network interface. */
 private class TetherTcpLink(
-    private val token: String,
+    context: Context,
     private val onConnectionState: (Boolean, String) -> Unit,
+    private val onPairingState: (Boolean, String) -> Unit,
     private val onScreenFrame: (Bitmap?) -> Unit
 ) {
+    private val pairingStore = PairingStore(context.applicationContext)
+    @Volatile private var sessionToken: String? = pairingStore.loadToken()
+    @Volatile private var pairingCode = newPairingCode()
     private val outgoing = LinkedBlockingQueue<String>(512)
     @Volatile private var closed = false
     @Volatile private var serverSocket: ServerSocket? = null
@@ -487,6 +577,7 @@ private class TetherTcpLink(
 
     fun start() {
         if (closed || workerThread?.isAlive == true) return
+        publishPairingState()
         workerThread = thread(name = "UsbTetherPenServer", isDaemon = true) { serve() }
     }
 
@@ -532,20 +623,54 @@ private class TetherTcpLink(
 
     private fun runSession(socket: Socket) {
         try {
-            val input = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8), 8192)
+            val input = DataInputStream(BufferedInputStream(socket.getInputStream(), 32 * 1024))
             val output = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8), 8192)
-            writeLine(output, JSONObject().put("type", "service").put("name", "s23-drawing-tablet").put("v", 1).toString())
+            val tokenAtGreeting = sessionToken
+            val challenge = newChallenge()
+            val greeting = JSONObject()
+                .put("type", "service")
+                .put("name", "virtualdt")
+                .put("v", PROTOCOL_VERSION)
+                .put("nonce", challenge)
+                .put("paired", tokenAtGreeting != null)
+                .put("proof", makeAuthProof(tokenAtGreeting ?: pairingCode, challenge))
+            writeLine(output, greeting.toString())
 
             val hello = readLimitedLine(input) ?: throw IllegalStateException("PC closed the connection.")
             val request = JSONObject(hello)
-            val supplied = request.optString("token", "")
-            if (request.optString("type") != "hello" || request.optInt("v") != 1 || supplied != token) {
+            if (request.optInt("v") != PROTOCOL_VERSION) {
+                writeLine(output, JSONObject().put("type", "error").put("message", "protocol_mismatch").toString())
+                throw IllegalStateException("PC app protocol does not match. Install matching VirtualDT releases.")
+            }
+
+            if (tokenAtGreeting == null && request.optString("type") == "pair") {
+                val suppliedCode = request.optString("code", "").uppercase().replace("-", "")
+                val proposedToken = request.optString("token", "")
+                if (suppliedCode != pairingCode || !proposedToken.matches(Regex("[A-Za-z0-9_-]{40,64}"))) {
+                    writeLine(output, JSONObject().put("type", "error").put("message", "pairing_code_invalid").toString())
+                    throw IllegalStateException("VirtualDT pairing code was rejected.")
+                }
+                pairingStore.saveToken(proposedToken)
+                sessionToken = proposedToken
+                onPairingState(true, "")
+            } else if (tokenAtGreeting != null && request.optString("type") == "hello") {
+                val expectedProof = makeAuthProof(tokenAtGreeting, challenge)
+                val suppliedProof = request.optString("proof", "")
+                val valid = MessageDigest.isEqual(
+                    expectedProof.toByteArray(Charsets.US_ASCII),
+                    suppliedProof.toByteArray(Charsets.US_ASCII)
+                )
+                if (!valid) {
+                    writeLine(output, JSONObject().put("type", "error").put("message", "unauthorized").toString())
+                    throw IllegalStateException("VirtualDT PC authentication failed.")
+                }
+            } else {
                 writeLine(output, JSONObject().put("type", "error").put("message", "unauthorized").toString())
-                throw IllegalStateException("PC app rejected. Install the matching app releases.")
+                throw IllegalStateException("VirtualDT PC pairing state does not match.")
             }
 
             outgoing.clear()
-            writeLine(output, JSONObject().put("type", "ready").put("v", 1).toString())
+            writeLine(output, JSONObject().put("type", "ready").put("v", PROTOCOL_VERSION).toString())
             connected = true
             publish(true, "Connected — ready to draw")
             writerThread = thread(name = "UsbTetherPenWriter", isDaemon = true) {
@@ -563,12 +688,15 @@ private class TetherTcpLink(
                 val line = readLimitedLine(input) ?: break
                 val packet = JSONObject(line)
                 if (packet.optString("type") == "screen") {
-                    val encoded = packet.optString("jpeg", "")
-                    if (encoded.isNotEmpty()) {
-                        val bytes = Base64.decode(encoded, Base64.DEFAULT)
-                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                        if (bitmap != null) onScreenFrame(bitmap)
-                    }
+                    val frameBytes = packet.optLong("bytes", -1)
+                    if (packet.optInt("v") != PROTOCOL_VERSION || packet.optString("format") != "jpeg" ||
+                        frameBytes !in 1..MAX_SCREEN_FRAME_BYTES.toLong()
+                    ) throw IllegalArgumentException("PC sent an invalid screen frame header.")
+                    val bytes = ByteArray(frameBytes.toInt())
+                    input.readFully(bytes)
+                    val options = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+                    val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
+                    if (bitmap != null) onScreenFrame(bitmap)
                 }
             }
             if (!closed) publish(false, "PC disconnected. The phone is ready to reconnect.")
@@ -595,6 +723,15 @@ private class TetherTcpLink(
         }
     }
 
+    fun resetPairing() {
+        if (closed) return
+        pairingStore.clear()
+        sessionToken = null
+        pairingCode = newPairingCode()
+        onPairingState(false, pairingCode)
+        try { activeSocket?.close() } catch (_: Exception) { }
+    }
+
     private fun findUsbTetherAddress(): InetAddress? {
         return try {
             val interfaces = NetworkInterface.getNetworkInterfaces() ?: return null
@@ -615,14 +752,14 @@ private class TetherTcpLink(
         }
     }
 
-    private fun readLimitedLine(reader: BufferedReader): String? {
-        val line = StringBuilder()
+    private fun readLimitedLine(input: DataInputStream): String? {
+        val line = ByteArrayOutputStream()
         while (true) {
-            val next = reader.read()
-            if (next == -1) return if (line.isEmpty()) null else line.toString()
-            if (next == '\n'.code) return line.toString().removeSuffix("\r")
-            if (line.length >= MAX_PROTOCOL_LINE) throw IllegalArgumentException("Protocol message is too large.")
-            line.append(next.toChar())
+            val next = input.read()
+            if (next == -1) return if (line.size() == 0) null else line.toString(Charsets.UTF_8.name())
+            if (next == '\n'.code) return line.toString(Charsets.UTF_8.name()).removeSuffix("\r")
+            if (line.size() >= MAX_PROTOCOL_LINE) throw IllegalArgumentException("Protocol message is too large.")
+            line.write(next)
         }
     }
 
@@ -636,6 +773,11 @@ private class TetherTcpLink(
         if (lastStatus == message && connected == isConnected) return
         lastStatus = message
         onConnectionState(isConnected, message)
+    }
+
+    private fun publishPairingState() {
+        val paired = sessionToken != null
+        onPairingState(paired, if (paired) "" else pairingCode)
     }
 
     private fun pause(milliseconds: Long) {

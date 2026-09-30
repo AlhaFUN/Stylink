@@ -5,18 +5,32 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import base64
 import ctypes
 import json
 import math
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from typing import Any
 
 PORT = 8765
-MAX_LINE = 2 * 1024 * 1024
-AUTH_TOKEN = "MySecretToken123"
-SERVICE_GREETING = {"type": "service", "name": "s23-drawing-tablet", "v": 1}
+MAX_LINE = 64 * 1024
+MAX_FRAME_BYTES = 16 * 1024 * 1024
+PROTOCOL_VERSION = 2
+SERVICE_GREETING = {"type": "service", "name": "virtualdt", "v": PROTOCOL_VERSION}
+
+
+class PairingCodeRequired(ValueError):
+    """The user must enter the one-time code shown by the phone."""
+
+
+class PairingMismatch(ValueError):
+    """The phone is paired to another PC or the saved key is missing."""
+
+
+class PairingRejected(ValueError):
+    """The phone rejected the supplied one-time pairing code."""
 
 if sys.platform != "win32":
     raise SystemExit("This host injector requires Windows 10 1809+ (desktop).")
@@ -287,12 +301,7 @@ async def connect_to_phone(
     on_client_state: Any | None = None,
     timeout: float = 1.0,
 ) -> None:
-    """Connect outward to the phone's USB-tethered TCP service.
-
-    The phone sends a harmless service greeting first. Credentials are sent
-    only after that greeting matches, so checking gateway addresses cannot
-    disclose the session token to unrelated network devices.
-    """
+    """Connect to VirtualDT, pairing once before using challenge-response auth."""
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(phone_ip, PORT, limit=MAX_LINE), timeout=timeout
     )
@@ -306,27 +315,68 @@ async def connect_to_phone(
         capture_rect = CaptureRect(args.left, args.top, args.width, args.height)
 
     async def send_screen_preview(writer: asyncio.StreamWriter) -> None:
-        from pc.screen_capture import jpeg_preview
+        from pc.screen_capture import PreviewCapture
 
-        while True:
-            try:
-                image, width, height = await asyncio.to_thread(jpeg_preview, capture_rect)
-                message = {
-                    "type": "screen",
-                    "jpeg": base64.b64encode(image).decode("ascii"),
-                    "width": width,
-                    "height": height,
-                }
-                writer.write((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
-                await writer.drain()
-                await asyncio.sleep(0.2)
-            except asyncio.CancelledError:
-                raise
-            except (ConnectionError, BrokenPipeError):
-                return
-            except Exception as exc:
-                print(f"Screen preview paused: {exc}")
-                await asyncio.sleep(1.0)
+        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="VirtualDT-Capture")
+        loop = asyncio.get_running_loop()
+        capture = None
+        interval = 1.0 / max(1, min(30, int(getattr(args, "preview_fps", 15))))
+        max_width = max(320, min(1920, int(getattr(args, "preview_max_width", 960))))
+        quality = max(30, min(90, int(getattr(args, "preview_quality", 58))))
+        next_frame_at = loop.time()
+        try:
+            # A single-thread executor keeps the MSS handle on its owning thread.
+            capture = await loop.run_in_executor(executor, PreviewCapture)
+            while True:
+                try:
+                    image, width, height = await loop.run_in_executor(
+                        executor,
+                        partial(
+                            capture.capture,
+                            capture_rect,
+                            max_width=max_width,
+                            quality=quality,
+                        ),
+                    )
+                    if not image or len(image) > MAX_FRAME_BYTES:
+                        raise ValueError("Preview frame exceeded the supported size.")
+                    header = {
+                        "type": "screen",
+                        "v": PROTOCOL_VERSION,
+                        "format": "jpeg",
+                        "bytes": len(image),
+                        "width": width,
+                        "height": height,
+                    }
+                    header_bytes = (json.dumps(header, separators=(",", ":")) + "\n").encode("utf-8")
+                    # One write and one drain; raw JPEG avoids Base64's 33% overhead.
+                    writer.write(header_bytes + image)
+                    await writer.drain()
+
+                    next_frame_at += interval
+                    delay = next_frame_at - loop.time()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                    else:
+                        # Drop missed frame slots instead of building a stale queue.
+                        next_frame_at = loop.time()
+                except asyncio.CancelledError:
+                    raise
+                except (ConnectionError, BrokenPipeError):
+                    return
+                except Exception as exc:
+                    print(f"Screen preview paused: {exc}")
+                    next_frame_at = loop.time() + 1.0
+                    await asyncio.sleep(1.0)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            if capture is not None:
+                try:
+                    await loop.run_in_executor(executor, capture.close)
+                except Exception:
+                    pass
+            executor.shutdown(wait=False, cancel_futures=True)
 
     peer = writer.get_extra_info("peername")
     try:
@@ -334,21 +384,67 @@ async def connect_to_phone(
         if not raw or len(raw) > MAX_LINE:
             raise ValueError("phone did not send a service greeting")
         greeting = json.loads(raw)
-        if greeting != SERVICE_GREETING:
-            raise ValueError("network device did not identify as the S23 Drawing Tablet app")
+        if not isinstance(greeting, dict) or any(
+            greeting.get(key) != value for key, value in SERVICE_GREETING.items()
+        ):
+            raise ValueError("network device did not identify as the VirtualDT app")
 
-        # Identify the phone before creating the pointer or sending credentials.
-        injector = PenInjector(get_screen_rect(args))
-        hello = {"type": "hello", "v": 1, "token": AUTH_TOKEN}
-        writer.write((json.dumps(hello, separators=(",", ":")) + "\n").encode("utf-8"))
+        nonce = greeting.get("nonce")
+        if not isinstance(nonce, str) or len(nonce) != 64:
+            raise ValueError("phone sent an invalid authentication challenge")
+
+        from pc.pairing import make_auth_proof, new_session_token, verify_auth_proof
+
+        is_paired = greeting.get("paired")
+        pairing_token = getattr(args, "pairing_token", None)
+        is_new_pairing = False
+        if is_paired is True:
+            if not pairing_token:
+                raise PairingMismatch(
+                    "This phone is already paired to another PC. Tap Reset pairing on the phone, then reconnect."
+                )
+            if not verify_auth_proof(pairing_token, nonce, str(greeting.get("proof", ""))):
+                raise PairingMismatch(
+                    "The saved pairing does not match this phone. Reset pairing on the phone if you changed PCs."
+                )
+            request = {
+                "type": "hello",
+                "v": PROTOCOL_VERSION,
+                "proof": make_auth_proof(pairing_token, nonce),
+            }
+        elif is_paired is False:
+            code = str(getattr(args, "pairing_code", "") or "").strip().upper().replace("-", "")
+            if not code:
+                raise PairingCodeRequired("Enter the one-time code shown in VirtualDT on the phone.")
+            if not verify_auth_proof(code, nonce, str(greeting.get("proof", ""))):
+                raise PairingRejected("This connection did not prove the one-time code shown on the phone.")
+            pairing_token = getattr(args, "new_pairing_token", None) or new_session_token()
+            request = {
+                "type": "pair",
+                "v": PROTOCOL_VERSION,
+                "code": code,
+                "token": pairing_token,
+            }
+            is_new_pairing = True
+        else:
+            raise ValueError("phone did not report its pairing state")
+
+        writer.write((json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8"))
         await writer.drain()
         raw = await asyncio.wait_for(reader.readline(), timeout=5.0)
         if not raw or len(raw) > MAX_LINE:
             raise ValueError("phone did not confirm the session")
         response = json.loads(raw)
-        if not isinstance(response, dict) or response.get("type") != "ready" or response.get("v") != 1:
-            raise ValueError("phone rejected the session; update both apps from the same release")
+        if isinstance(response, dict) and response.get("type") == "error":
+            if response.get("message") == "pairing_code_invalid":
+                raise PairingRejected("That code did not match. Check the code shown on the phone and try again.")
+            raise ValueError("phone rejected this PC. Reset pairing on the phone if you changed PCs.")
+        if not isinstance(response, dict) or response.get("type") != "ready" or response.get("v") != PROTOCOL_VERSION:
+            raise ValueError("phone rejected the session; install matching VirtualDT app releases")
 
+        if is_new_pairing and callable(getattr(args, "on_pairing_established", None)):
+            args.on_pairing_established(pairing_token)
+        injector = PenInjector(get_screen_rect(args))
         authenticated = True
         if on_client_state is not None:
             on_client_state(True, str(peer))

@@ -36,21 +36,21 @@ jobs:
           --icon pc/assets/s23-drawing-tablet.ico
           --add-data "pc/assets/s23-drawing-tablet.ico;pc/assets"
           --collect-all mss --collect-all PIL
-          --paths . --name S23DrawingTabletPC --distpath release
+          --paths . --name VirtualDT --distpath release
           pc/tablet_companion.py
 
       - name: Assemble simple Windows setup files
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release\setup | Out-Null
-          Copy-Item release\S23DrawingTabletPC.exe release\setup\
+          Copy-Item release\VirtualDT.exe release\setup\
           Copy-Item pc\README-Windows.txt release\setup\README.txt
           Copy-Item LICENSE release\setup\
 
       - name: Upload Windows setup
         uses: actions/upload-artifact@v4
         with:
-          name: S23-Tablet-PC-Setup
+          name: VirtualDT-PC-Setup
           path: release/setup/*
           if-no-files-found: error
           retention-days: 30
