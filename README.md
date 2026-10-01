@@ -7,8 +7,8 @@ Use a compatible Android phone or tablet stylus as a Windows drawing tablet. Sty
 ## Install
 
 1. Open the [latest Stylink release](https://github.com/AlhaFUN/Stylink/releases/latest).
-2. Download `app-debug.apk` for your Android phone or tablet, then install it. Android may ask you to allow this APK to be installed.
-3. Download `Stylink.exe` for your Windows PC, then open it.
+2. Download `StylinkM.exe` for your Android phone or tablet, then install it. Android may ask you to allow this APK to be installed.
+3. Download `StylinkPC.exe` for your Windows PC, then open it.
 
 Windows may show a SmartScreen message because this community build is not code-signed.
 
